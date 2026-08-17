@@ -36,6 +36,12 @@ scripts/fetch_news.py
       속보·종합은 처음부터 라이트 모델로 직행한다. 물량이 많은 속보·종합이 자주
       실패하는 상위 모델(503/타임아웃)에서 시간을 허비하지 않게 하는 동시에,
       상위 모델 RPD를 물량 적은 단독에 집중해서 아낀다.
+RPD 소진 상태 영속화(2026-08-17): 상위 모델(3.7/3.6/3.5) RPD가 실측 20/일로 매우
+      낮아 하루 초반에 바로 소진되는데, GitHub Actions는 실행마다 파이썬 프로세스가
+      새로 뜨는 환경이라 "오늘 이미 소진됐다"는 기억이 실행마다 사라져 매번 헛되이
+      상위 모델부터 재시도하고 있었다(실측: 단독 13건 중 5건이 요약 없이 발송됨).
+      state.json에 날짜와 함께 저장해두고 재사용한다(load_gemini_exhausted /
+      save_gemini_exhausted) — 날짜가 바뀌면 초기화된다.
 
 실행: python scripts/fetch_news.py
 """
@@ -177,6 +183,30 @@ def save_state(state: dict):
 def prune_state(state: dict):
     cutoff = now_kst() - timedelta(hours=DEDUP_WINDOW_HOURS * 4)  # guid 중복 방지는 좀 더 길게
     state["sent"] = [s for s in state["sent"] if s["sent_at"] >= cutoff.isoformat()]
+
+
+def load_gemini_exhausted(state: dict) -> dict:
+    """오늘 이미 RPD가 소진된 것으로 확인된 (모델, 키) 조합을 state에서 복원한다.
+
+    실사고(2026-08-17): 상위 모델(3.7/3.6/3.5) RPD가 20으로 매우 낮아 사실상 하루
+    초반에 바로 소진되는데, cron마다 파이썬 프로세스가 새로 뜨면서 "오늘 이미
+    소진됐다"는 기억이 실행마다 사라져 매번 헛되이 상위 모델부터 재시도하고
+    있었다(실측: 최근 단독 13건 중 5건이 요약 없이 나감). 하루 단위로 state.json에
+    저장해두고 재사용한다 — RPD는 자정(태평양시) 리셋이지만 정확한 경계까지 맞출
+    필요는 없어 KST 날짜가 바뀌면 초기화하는 것으로 근사한다.
+    """
+    g = state.get("gemini_exhausted") or {}
+    today = now_kst().strftime("%Y-%m-%d")
+    if g.get("date") != today:
+        return {}
+    return {m: set(idxs) for m, idxs in g.get("keys", {}).items()}
+
+
+def save_gemini_exhausted(state: dict, exhausted_keys: dict):
+    state["gemini_exhausted"] = {
+        "date": now_kst().strftime("%Y-%m-%d"),
+        "keys": {m: sorted(s) for m, s in exhausted_keys.items() if s},
+    }
 
 
 # =========================
@@ -356,8 +386,10 @@ def crawl_article_text(url: str) -> str:
         return ""
 
 
-# 모델별로 RPD(429)가 소진된 키를 기록 — 이 프로세스(=1회 실행) 동안만 유효.
-# NewsFinal(gemini_summarizer.py)과 같은 구조. FULL/LITE 두 목록의 합집합을 키로 둔다.
+# 모델별로 RPD(429)가 소진된 키를 기록. FULL/LITE 두 목록의 합집합을 키로 둔다.
+# run() 시작 시 state.json에 저장된 "오늘 이미 소진됨" 기록으로 시딩된다(하루 단위
+# 유지) — 실행마다 프로세스가 새로 뜨는 GitHub Actions 환경이라 이걸 안 하면 RPD가
+# 낮은 상위 모델(20/일)을 매 실행 헛되이 재시도하게 된다.
 _ALL_GEMINI_MODELS = sorted(set(GEMINI_MODELS_FULL) | set(GEMINI_MODELS_LITE))
 _exhausted_keys = {m: set() for m in _ALL_GEMINI_MODELS}
 _current_key_idx = 0
@@ -508,6 +540,15 @@ def run():
 
     state = load_state()
     prune_state(state)
+
+    # 오늘 이미 RPD 소진된 것으로 확인된 모델/키는 이번 실행에서 아예 건너뛴다.
+    seeded = load_gemini_exhausted(state)
+    for model, idxs in seeded.items():
+        if model in _exhausted_keys:
+            _exhausted_keys[model].update(idxs)
+    if seeded:
+        print(f"[Gemini] 오늘 이미 소진된 것으로 기록된 모델: "
+              f"{ {m: sorted(s) for m, s in seeded.items()} }")
     sent_guids = {s["guid"] for s in state["sent"]}
 
     dedup_cutoff = (now_kst() - timedelta(hours=DEDUP_WINDOW_HOURS)).isoformat()
@@ -587,6 +628,7 @@ def run():
             print(f"  ❌ 발송 실패: {res}")
         time.sleep(SEND_INTERVAL_SEC)
 
+    save_gemini_exhausted(state, _exhausted_keys)
     save_state(state)
 
     if review_log:
