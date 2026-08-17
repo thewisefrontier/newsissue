@@ -12,11 +12,14 @@ scripts/fetch_news.py
       - DUP_REVIEW_THRESHOLD~SKIP 미만 → 애매한 경우, 발송은 하되 콘솔/리뷰 로그에 남겨 나중에 임계값 조정 근거로 삼는다
       (Supabase/Gemini 통합 재작성 단계는 여기선 안 씀 — 우리는 자체 기사를 쓰는 게 아니라
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
-본문 미리보기: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
-      실제 언론사 URL을 먼저 알아낸 뒤, 그 페이지에서 첫 문단을 긁어 요약으로 붙인다.
-      다음뉴스(v.daum.net) 등 JS로 렌더링되는 포털 미러 페이지는 본문이 서버 응답에 없고
-      사이트 소개 문구뿐이라, 이런 도메인은 SKIP_CRAWL_DOMAINS로 아예 크롤링을 안 한다
-      (실사고 2026-08-17: "다음뉴스를 만나보세요" 소개문이 본문으로 오인되어 발송됨).
+링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
+      실제 언론사 URL을 먼저 알아내 그쪽을 보여준다.
+본문 미리보기는 뺐다(2026-08-17): 기사 페이지를 긁어 첫 문단을 보여주는 방식을 시도했으나
+      매체마다 "기사 읽어주기 서비스" 안내, 댓글 로그인 안내, 포털 소개문 같은 위젯 텍스트가
+      본문과 같은 <p> 구조로 섞여 있어 오발송이 반복됐다(다음뉴스·연합뉴스TV·KBS 3건 실사고).
+      NewsFinal은 이런 크롤링 노이즈를 Gemini로 한 번 걸러서 보여주는데, 우리는 그 필터링
+      단계가 없어 구조적으로 더 취약하다 — 더 나은 방법(LLM 요약 등) 나오기 전까진 제목/출처/
+      링크만 보낸다.
 
 실행: python scripts/fetch_news.py
 """
@@ -29,7 +32,6 @@ import html
 import time
 import hashlib
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
 
 import feedparser
 import requests
@@ -79,17 +81,6 @@ DEDUP_WINDOW_HOURS = 6      # 이 시간 안에 보낸 기사만 비교 대상�
 
 MAX_SEND_PER_RUN = 15       # 텔레그램 flood 방지용 1회 실행 상한
 SEND_INTERVAL_SEC = 1.5     # 발송 간 대기
-
-EXCERPT_MAX_CHARS = 160
-CRAWL_TIMEOUT_SEC = 8
-# 사진 캡션/저작권 표기 등 본문이 아닌 잡음. 이 문구가 나오면 그 문단부터는 버린다.
-EXCERPT_STOP_MARKS = ("무단전재", "재배포 금지", "AI 학습", "저작권자", "Copyright ©")
-
-# JS로 렌더링되는 포털 미러 — 서버 응답 HTML에 실제 기사 본문이 없고 사이트 소개
-# 문구("다음뉴스를 만나보세요" 등)만 있다. 실사고(2026-08-17): v.daum.net에서 이
-# 소개문을 본문으로 오인해 그대로 발송함 — 매체 소개문은 EXCERPT_STOP_MARKS의
-# 저작권 문구와 안 겹쳐서 필터를 통과했다. 아예 이 도메인은 크롤링을 시도하지 않는다.
-SKIP_CRAWL_DOMAINS = {"v.daum.net", "news.v.daum.net", "n.news.naver.com", "m.news.naver.com"}
 
 
 # =========================
@@ -195,7 +186,7 @@ def fetch_candidates(category: str, url: str) -> list:
 
 
 # =========================
-# 본문 미리보기
+# 링크 해석
 # =========================
 
 def resolve_real_url(google_link: str) -> str:
@@ -209,52 +200,6 @@ def resolve_real_url(google_link: str) -> str:
     return google_link
 
 
-def crawl_excerpt(url: str, title: str) -> str:
-    """기사 URL에서 첫 문단을 긁어 짧은 미리보기로 반환. 실패하면 빈 문자열."""
-    domain = urlparse(url).netloc.replace("www.", "")
-    if domain in SKIP_CRAWL_DOMAINS:
-        return ""
-    try:
-        res = requests.get(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-            timeout=CRAWL_TIMEOUT_SEC,
-        )
-        if res.status_code != 200:
-            return ""
-        page = res.text
-        page = re.sub(r"<script[^>]*>.*?</script>", "", page, flags=re.DOTALL | re.IGNORECASE)
-        page = re.sub(r"<style[^>]*>.*?</style>", "", page, flags=re.DOTALL | re.IGNORECASE)
-
-        art = re.search(r"<article[^>]*>(.*?)</article>", page, re.DOTALL | re.IGNORECASE)
-        scope = art.group(1) if art else page
-
-        title_core = re.sub(r"[\[\【]\s*(속보|단독)\s*[\]\】\}]", "", title).strip()
-
-        for p in re.findall(r"<p[^>]*>(.*?)</p>", scope, re.DOTALL | re.IGNORECASE):
-            t = re.sub(r"<[^>]+>", "", p).strip()
-            t = re.sub(r"\s+", " ", t)
-            if len(t) < 40:
-                continue
-            if any(mark in t for mark in EXCERPT_STOP_MARKS):
-                continue
-            if fuzz_ratio_cheap(t, title_core) > 0.6:
-                continue  # 제목을 그대로 반복하는 문단(일부 매체 템플릿)은 건너뛴다
-            if len(t) > EXCERPT_MAX_CHARS:
-                t = t[:EXCERPT_MAX_CHARS].rsplit(" ", 1)[0] + "…"
-            return t
-        return ""
-    except Exception:
-        return ""
-
-
-def fuzz_ratio_cheap(a: str, b: str) -> float:
-    ta, tb = _trigrams(a), _trigrams(b)
-    if not ta or not tb:
-        return 0.0
-    return len(ta & tb) / len(ta | tb)
-
-
 # =========================
 # TELEGRAM
 # =========================
@@ -263,11 +208,9 @@ def send_telegram(item: dict) -> dict:
     emoji = TAG_LABEL_EMOJI.get(item["category"], "📰")
     title_safe = html.escape(item["title"])
     source_safe = html.escape(item["source"] or "출처 미상")
-    excerpt_block = f"\n\n{html.escape(item['excerpt'])}" if item.get("excerpt") else ""
     link = item.get("real_link") or item["link"]
     msg = (
-        f"{emoji} {title_safe}"
-        f"{excerpt_block}\n\n"
+        f"{emoji} {title_safe}\n\n"
         f"📎 {source_safe}\n"
         f"🔗 {link}"
     )
@@ -330,7 +273,6 @@ def run():
     sent_count = 0
     for item in to_send:
         item["real_link"] = resolve_real_url(item["link"])
-        item["excerpt"] = crawl_excerpt(item["real_link"], item["title"])
 
         res = send_telegram(item)
         if res.get("ok"):
