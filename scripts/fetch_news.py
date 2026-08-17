@@ -63,6 +63,7 @@ GEMINI_API_KEYS = [k for k in [os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_AP
 GEMINI_MODELS = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
                   "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 CHANNEL_TAG = "뉴스앤이슈"
+CHANNEL_URL = "https://t.me/news_issue"
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "state.json")
 
@@ -336,7 +337,7 @@ def send_telegram(item: dict) -> dict:
     source_safe = html.escape(item["source"] or "출처 미상")
     link = item.get("real_link") or item["link"]
     summary_block = f"\n\n{html.escape(item['summary'])}" if item.get("summary") else ""
-    tag_line = f"\n\n{item['category']}, {CHANNEL_TAG}"
+    tag_line = f"\n\n{item['category']}, {CHANNEL_TAG} | {CHANNEL_URL}"
     msg = (
         f"{emoji} {title_safe}"
         f"{summary_block}\n\n"
