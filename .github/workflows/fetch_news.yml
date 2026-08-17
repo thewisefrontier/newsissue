@@ -22,8 +22,10 @@ jobs:
     runs-on: ubuntu-latest
     # 잡 전체 강제 타임아웃(기본 360분은 너무 김). 실사고(2026-08-17): Gemini
     # 폴백 체인(모델 5개×키 2개)이 겹치며 8분 넘게 걸려 사용자가 수동으로 중단함.
-    # 크론 간격(10분)보다 짧게 잡아 다음 사이클과 안 겹치게 한다.
-    timeout-minutes: 8
+    # 이후 모든 카테고리(속보 포함)에서 최대 20건까지 크롤링·요약하도록 바뀌어
+    # 최악의 경우 더 오래 걸릴 수 있어(건당 최대 33초 × 20건 ≈ 11분) 15분으로
+    # 올렸다. 실제 크론 간격은 40~90분대라(GitHub 예약 지연) 이 정도는 안전하다.
+    timeout-minutes: 15
     steps:
       - name: 코드 체크아웃
         uses: actions/checkout@v5
@@ -80,7 +82,7 @@ jobs:
       - name: 속보/단독 수집 및 발송
         if: steps.guard.outputs.skip != 'true'
         # 스텝 자체에도 타임아웃을 걸어, 파이썬 쪽 시간 예산 로직이 뚫리는 경우를 대비한다.
-        timeout-minutes: 6
+        timeout-minutes: 12
         run: python scripts/fetch_news.py
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
