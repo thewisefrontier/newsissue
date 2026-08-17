@@ -15,7 +15,8 @@ scripts/fetch_news.py
 링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
       실제 언론사 URL을 먼저 알아내 그쪽을 보여준다. v.daum.net으로 귀결되는 기사는
       반복적으로 문제(위젯 텍스트 오발송, 사용자가 링크 자체를 원치 않음)가 있어 아예
-      발송에서 제외한다(EXCLUDE_LINK_DOMAINS).
+      발송에서 제외한다(EXCLUDE_LINK_DOMAINS). 메시지에는 raw URL을 노출하지 않고
+      "출처"라는 단어와 채널명 자체에 링크를 건다(2026-08-17 사용자 결정).
 본문 요약(2026-08-17 재도입): 정규식으로 "첫 문단"을 고르는 방식은 매체마다 다른 위젯
       텍스트(읽어주기 서비스, 댓글 안내 등)를 본문으로 오인해 반복적으로 실패했다(다음뉴스·
       연합뉴스TV·KBS 3건 실사고). 규칙 기반 대신 크롤링한 원문(노이즈 섞여도 무방)을 통째로
@@ -334,15 +335,16 @@ def summarize_with_gemini(title: str, raw_text: str) -> str:
 def send_telegram(item: dict) -> dict:
     emoji = TAG_LABEL_EMOJI.get(item["category"], "📰")
     title_safe = html.escape(item["title"])
-    source_safe = html.escape(item["source"] or "출처 미상")
     link = item.get("real_link") or item["link"]
     summary_block = f"\n\n{html.escape(item['summary'])}" if item.get("summary") else ""
-    tag_line = f"\n\n{item['category']}, {CHANNEL_TAG} | {CHANNEL_URL}"
+    # 채널 링크도 URL을 따로 노출하지 않고 채널명 자체에 건다(2026-08-17 사용자 결정).
+    tag_line = f"\n\n{item['category']}, <a href=\"{CHANNEL_URL}\">{CHANNEL_TAG}</a>"
+    # 링크는 매체명이 아니라 "출처"라는 고정 단어에 건다(2026-08-17 사용자 결정) —
+    # 어느 언론사인지는 메시지에 노출하지 않고, 클릭하면 원문으로 이동만 시킨다.
     msg = (
         f"{emoji} {title_safe}"
         f"{summary_block}\n\n"
-        f"📎 {source_safe}\n"
-        f"🔗 {link}"
+        f"📎 <a href=\"{link}\">출처</a>"
         f"{tag_line}"
     )
     res = requests.post(
