@@ -16,12 +16,12 @@ scripts/fetch_news.py
       실제 언론사 URL을 먼저 알아내 그쪽을 보여준다. v.daum.net으로 귀결되는 기사는
       반복적으로 문제(위젯 텍스트 오발송, 사용자가 링크 자체를 원치 않음)가 있어 아예
       발송에서 제외한다(EXCLUDE_LINK_DOMAINS).
-본문 미리보기는 뺐다(2026-08-17): 기사 페이지를 긁어 첫 문단을 보여주는 방식을 시도했으나
-      매체마다 "기사 읽어주기 서비스" 안내, 댓글 로그인 안내, 포털 소개문 같은 위젯 텍스트가
-      본문과 같은 <p> 구조로 섞여 있어 오발송이 반복됐다(다음뉴스·연합뉴스TV·KBS 3건 실사고).
-      NewsFinal은 이런 크롤링 노이즈를 Gemini로 한 번 걸러서 보여주는데, 우리는 그 필터링
-      단계가 없어 구조적으로 더 취약하다 — 더 나은 방법(LLM 요약 등) 나오기 전까진 제목/출처/
-      링크만 보낸다.
+본문 요약(2026-08-17 재도입): 정규식으로 "첫 문단"을 고르는 방식은 매체마다 다른 위젯
+      텍스트(읽어주기 서비스, 댓글 안내 등)를 본문으로 오인해 반복적으로 실패했다(다음뉴스·
+      연합뉴스TV·KBS 3건 실사고). 규칙 기반 대신 크롤링한 원문(노이즈 섞여도 무방)을 통째로
+      Gemini에 넘겨 핵심만 2문장으로 뽑게 한다 — LLM은 광고/위젯 텍스트를 의미로 걸러내므로
+      정규식보다 안정적이다. 요약 실패 시(키 없음/쿼터 초과 등) 조용히 건너뛰고 제목/출처/
+      링크만 보낸다(발송 자체는 막지 않는다).
 
 실행: python scripts/fetch_news.py
 """
@@ -53,6 +53,16 @@ def now_kst() -> datetime:
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
+
+# 프로젝트(키) 2개로 무료 티어 RPD를 나눠 쓴다. 라이트 모델 RPD가 500이라 실측상
+# 대부분의 요약이 거기로 몰리는데(3.7/3.6/3.5가 503·타임아웃으로 자주 실패), 키 하나론
+# 바쁜 날 500 한도에 걸릴 수 있어 2개로 시작(2026-08-17 사용자 결정).
+GEMINI_API_KEYS = [k for k in [os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_2")] if k]
+
+# 최신 → 구버전 순 폴백 (NewsFinal gemini_summarizer.py와 동일한 검증된 순서)
+GEMINI_MODELS = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
+                  "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+CHANNEL_TAG = "뉴스앤이슈"
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "state.json")
 
@@ -208,6 +218,115 @@ def resolve_real_url(google_link: str) -> str:
 
 
 # =========================
+# 본문 요약
+# =========================
+
+CRAWL_TIMEOUT_SEC = 8
+CRAWL_MAX_CHARS = 4000  # LLM에 넘길 원문 상한 (비용/속도 절충)
+
+
+def crawl_article_text(url: str) -> str:
+    """기사 URL에서 본문 후보 텍스트를 긁어온다.
+
+    처음엔 <article>/<p> 태그로 정교하게 스코핑을 시도했으나, 언론사마다 마크업이
+    달라 실패했다(실사고 2026-08-17: newsis.com은 <article> 안에 "관련기사" 사이드바
+    제목 목록과 <script> 코드가 본문 <p>와 뒤섞여 있어 완전히 엉뚱한 내용이 잡힘).
+    정규식으로 정교하게 자르려 하지 않고, nav/header/footer/aside/스크립트류만 크게
+    걷어낸 뒤 페이지 텍스트를 통째로 Gemini에 넘긴다 — 어차피 LLM이 의미로 걸러내므로
+    우리가 미리 좁히려는 시도가 오히려 엉뚱한 내용을 골라내는 역효과를 냈다.
+    """
+    try:
+        res = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            timeout=CRAWL_TIMEOUT_SEC,
+        )
+        if res.status_code != 200:
+            return ""
+        page = res.text
+        for tag in ("script", "style", "nav", "header", "footer", "aside", "form", "noscript"):
+            page = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", "", page, flags=re.DOTALL | re.IGNORECASE)
+
+        text = re.sub(r"<[^>]+>", " ", page)
+        text = html.unescape(text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:CRAWL_MAX_CHARS]
+    except Exception:
+        return ""
+
+
+# 모델별로 RPD(429)가 소진된 키를 기록 — 이 프로세스(=1회 실행) 동안만 유효.
+# NewsFinal(gemini_summarizer.py)과 같은 구조.
+_exhausted_keys = {m: set() for m in GEMINI_MODELS}
+_current_key_idx = 0
+
+
+def summarize_with_gemini(title: str, raw_text: str) -> str:
+    """크롤링한 원문을 Gemini로 2문장 요약. 실패하면 빈 문자열(발송은 계속 진행)."""
+    global _current_key_idx
+    if not GEMINI_API_KEYS or not raw_text:
+        return ""
+
+    prompt = (
+        f"다음은 뉴스 기사 웹페이지 전체에서 태그만 제거하고 추출한 텍스트다. "
+        f"기사 제목: \"{title}\"\n\n"
+        "이 텍스트에는 광고, 구독 안내, 댓글, 저작권 문구뿐 아니라 '관련기사'나 "
+        "'많이 본 뉴스' 같은 다른 기사 제목 목록까지 섞여 있을 수 있다. 반드시 "
+        "위 제목과 일치하는 기사 본문만 찾아 그 핵심을 2문장 이내, 120자 안팎의 "
+        "한국어로 요약해라. 다른 기사의 내용을 섞지 마라. 해라체(-다로 끝나는 "
+        "문장)로 쓰고, 다른 언론사명은 언급하지 마라. 본문에서 확인되지 않는 내용은 "
+        "추가하지 마라. 본문을 찾을 수 없으면 빈 문자열만 출력해라. "
+        "요약문(또는 빈 문자열)만 출력하고 다른 말은 덧붙이지 마라.\n\n"
+        f"[추출된 텍스트]\n{raw_text}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        # maxOutputTokens=200은 3.x 계열(내부 추론에 토큰을 먼저 쓰는 "thinking"
+        # 모델)에서 답변 전에 토큰이 바닥나 parts가 비는 원인이었다(실측 2026-08-17).
+        # NewsFinal(gemini_summarizer.py)과 같은 500으로 맞춘다.
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 500},
+    }
+
+    n = len(GEMINI_API_KEYS)
+    for model in GEMINI_MODELS:
+        exhausted = _exhausted_keys[model]
+        available = [i for i in range(n) if i not in exhausted]
+        if not available:
+            continue
+        ordered = sorted(available, key=lambda i: (i - _current_key_idx) % n)
+
+        for idx in ordered:
+            try:
+                res = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    params={"key": GEMINI_API_KEYS[idx]},
+                    json=payload,
+                    timeout=20,
+                )
+                if res.status_code == 429:
+                    print(f"  ⚠️ Gemini({model}) 키 {idx+1} RPD 소진, 다른 키로 폴백")
+                    exhausted.add(idx)
+                    continue
+                if res.status_code != 200:
+                    print(f"  ⚠️ Gemini({model}) 키 {idx+1} HTTP {res.status_code}, 폴백")
+                    continue
+                cand = res.json()["candidates"][0]
+                # MAX_TOKENS 등으로 잘린 응답은 버린다(끊긴 문장 발송 사고 방지).
+                finish = cand.get("finishReason", "")
+                if finish and finish != "STOP":
+                    print(f"  ⚠️ Gemini({model}) 비정상 종료(finishReason={finish}), 폴백")
+                    continue
+                text = "".join(p.get("text", "") for p in cand["content"]["parts"]).strip()
+                if text:
+                    _current_key_idx = (idx + 1) % n
+                    return text
+            except Exception as e:
+                print(f"  ⚠️ Gemini({model}) 키 {idx+1} 요약 실패: {e}")
+                continue
+    return ""
+
+
+# =========================
 # TELEGRAM
 # =========================
 
@@ -216,10 +335,14 @@ def send_telegram(item: dict) -> dict:
     title_safe = html.escape(item["title"])
     source_safe = html.escape(item["source"] or "출처 미상")
     link = item.get("real_link") or item["link"]
+    summary_block = f"\n\n{html.escape(item['summary'])}" if item.get("summary") else ""
+    tag_line = f"\n\n{item['category']}, {CHANNEL_TAG}"
     msg = (
-        f"{emoji} {title_safe}\n\n"
+        f"{emoji} {title_safe}"
+        f"{summary_block}\n\n"
         f"📎 {source_safe}\n"
         f"🔗 {link}"
+        f"{tag_line}"
     )
     res = requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -290,6 +413,9 @@ def run():
             })
             print(f"  🚫 제외 도메인({domain}): {item['title'][:40]}")
             continue
+
+        raw_text = crawl_article_text(item["real_link"])
+        item["summary"] = summarize_with_gemini(item["title"], raw_text)
 
         res = send_telegram(item)
         if res.get("ok"):
