@@ -23,6 +23,10 @@ scripts/fetch_news.py
       Gemini에 넘겨 핵심만 2문장으로 뽑게 한다 — LLM은 광고/위젯 텍스트를 의미로 걸러내므로
       정규식보다 안정적이다. 요약 실패 시(키 없음/쿼터 초과 등) 조용히 건너뛰고 제목/출처/
       링크만 보낸다(발송 자체는 막지 않는다).
+요약 시간 예산(2026-08-17): 모델 5개×키 2개 폴백 체인이 겹치며 기사 1건 요약에 몇 분씩
+      걸려 전체 실행이 8분 넘게 지연된 실사고가 있었다. 기사 1건당 요약 시도 전체에
+      GEMINI_TIME_BUDGET_SEC 상한을 두고, 넘으면 나머지 모델/키는 건너뛰고 빈 요약으로
+      넘어간다(발송 자체는 막지 않음). 요청 1회 타임아웃도 20→10초로 줄였다.
 
 실행: python scripts/fetch_news.py
 """
@@ -226,6 +230,13 @@ def resolve_real_url(google_link: str) -> str:
 CRAWL_TIMEOUT_SEC = 8
 CRAWL_MAX_CHARS = 4000  # LLM에 넘길 원문 상한 (비용/속도 절충)
 
+# 모델 5개 × 키 2개 = 최대 10번 시도, 요청당 타임아웃까지 겹치면 기사 1건에 몇 분씩
+# 걸릴 수 있다(실사고 2026-08-17: 전체 실행이 8분 넘게 걸려 사용자가 직접 중단함).
+# 기사 1건당 요약에 쓸 총 시간 예산을 두고, 넘으면 나머지 모델/키는 시도하지 않고
+# 빈 요약으로 넘어간다(발송 자체는 막지 않는다).
+GEMINI_TIMEOUT_SEC = 10       # 요청 1회당 타임아웃(기존 20초 → 단축, 느린 요청 빨리 포기)
+GEMINI_TIME_BUDGET_SEC = 25   # 기사 1건의 요약 시도 전체에 쓰는 시간 상한
+
 
 def crawl_article_text(url: str) -> str:
     """기사 URL에서 본문 후보 텍스트를 긁어온다.
@@ -290,7 +301,11 @@ def summarize_with_gemini(title: str, raw_text: str) -> str:
     }
 
     n = len(GEMINI_API_KEYS)
+    start = time.monotonic()
     for model in GEMINI_MODELS:
+        if time.monotonic() - start > GEMINI_TIME_BUDGET_SEC:
+            print(f"  ⏱️ 요약 시간 예산({GEMINI_TIME_BUDGET_SEC}초) 초과, 남은 모델 건너뜀")
+            break
         exhausted = _exhausted_keys[model]
         available = [i for i in range(n) if i not in exhausted]
         if not available:
@@ -298,12 +313,15 @@ def summarize_with_gemini(title: str, raw_text: str) -> str:
         ordered = sorted(available, key=lambda i: (i - _current_key_idx) % n)
 
         for idx in ordered:
+            if time.monotonic() - start > GEMINI_TIME_BUDGET_SEC:
+                print(f"  ⏱️ 요약 시간 예산({GEMINI_TIME_BUDGET_SEC}초) 초과, 남은 키 건너뜀")
+                return ""
             try:
                 res = requests.post(
                     f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                     params={"key": GEMINI_API_KEYS[idx]},
                     json=payload,
-                    timeout=20,
+                    timeout=GEMINI_TIMEOUT_SEC,
                 )
                 if res.status_code == 429:
                     print(f"  ⚠️ Gemini({model}) 키 {idx+1} RPD 소진, 다른 키로 폴백")
