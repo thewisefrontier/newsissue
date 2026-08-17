@@ -13,7 +13,9 @@ scripts/fetch_news.py
       (Supabase/Gemini 통합 재작성 단계는 여기선 안 씀 — 우리는 자체 기사를 쓰는 게 아니라
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
 링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
-      실제 언론사 URL을 먼저 알아내 그쪽을 보여준다.
+      실제 언론사 URL을 먼저 알아내 그쪽을 보여준다. v.daum.net으로 귀결되는 기사는
+      반복적으로 문제(위젯 텍스트 오발송, 사용자가 링크 자체를 원치 않음)가 있어 아예
+      발송에서 제외한다(EXCLUDE_LINK_DOMAINS).
 본문 미리보기는 뺐다(2026-08-17): 기사 페이지를 긁어 첫 문단을 보여주는 방식을 시도했으나
       매체마다 "기사 읽어주기 서비스" 안내, 댓글 로그인 안내, 포털 소개문 같은 위젯 텍스트가
       본문과 같은 <p> 구조로 섞여 있어 오발송이 반복됐다(다음뉴스·연합뉴스TV·KBS 3건 실사고).
@@ -32,6 +34,7 @@ import html
 import time
 import hashlib
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import feedparser
 import requests
@@ -81,6 +84,10 @@ DEDUP_WINDOW_HOURS = 6      # 이 시간 안에 보낸 기사만 비교 대상�
 
 MAX_SEND_PER_RUN = 15       # 텔레그램 flood 방지용 1회 실행 상한
 SEND_INTERVAL_SEC = 1.5     # 발송 간 대기
+
+# v.daum.net은 반복적으로 문제가 됨(위젯 텍스트 오발송 실사고 + 사용자가 링크
+# 자체를 원치 않음, 2026-08-17). 원문이 이 도메인으로 귀결되면 아예 발송하지 않는다.
+EXCLUDE_LINK_DOMAINS = {"v.daum.net", "news.v.daum.net"}
 
 
 # =========================
@@ -273,6 +280,16 @@ def run():
     sent_count = 0
     for item in to_send:
         item["real_link"] = resolve_real_url(item["link"])
+
+        domain = urlparse(item["real_link"]).netloc.replace("www.", "")
+        if domain in EXCLUDE_LINK_DOMAINS:
+            # 발송은 생략하지만 guid는 기록해서 다음 실행에 다시 후보로 안 올라오게 한다.
+            state["sent"].append({
+                "guid": item["guid"], "title": item["title"], "category": item["category"],
+                "sent_at": now_kst().isoformat(),
+            })
+            print(f"  🚫 제외 도메인({domain}): {item['title'][:40]}")
+            continue
 
         res = send_telegram(item)
         if res.get("ok"):
