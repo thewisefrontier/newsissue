@@ -14,8 +14,9 @@ scripts/fetch_news.py
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
 본문 미리보기: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
       실제 언론사 URL을 먼저 알아낸 뒤, 그 페이지에서 첫 문단을 긁어 요약으로 붙인다.
-      다음뉴스(v.daum.net) 등 JS로 렌더링되는 포털 미러 페이지는 본문이 안 잡히는데,
-      이 경우 조용히 건너뛰고 제목/출처/링크만 보낸다(발송 자체를 막지는 않는다).
+      다음뉴스(v.daum.net) 등 JS로 렌더링되는 포털 미러 페이지는 본문이 서버 응답에 없고
+      사이트 소개 문구뿐이라, 이런 도메인은 SKIP_CRAWL_DOMAINS로 아예 크롤링을 안 한다
+      (실사고 2026-08-17: "다음뉴스를 만나보세요" 소개문이 본문으로 오인되어 발송됨).
 
 실행: python scripts/fetch_news.py
 """
@@ -28,6 +29,7 @@ import html
 import time
 import hashlib
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import feedparser
 import requests
@@ -82,6 +84,12 @@ EXCERPT_MAX_CHARS = 160
 CRAWL_TIMEOUT_SEC = 8
 # 사진 캡션/저작권 표기 등 본문이 아닌 잡음. 이 문구가 나오면 그 문단부터는 버린다.
 EXCERPT_STOP_MARKS = ("무단전재", "재배포 금지", "AI 학습", "저작권자", "Copyright ©")
+
+# JS로 렌더링되는 포털 미러 — 서버 응답 HTML에 실제 기사 본문이 없고 사이트 소개
+# 문구("다음뉴스를 만나보세요" 등)만 있다. 실사고(2026-08-17): v.daum.net에서 이
+# 소개문을 본문으로 오인해 그대로 발송함 — 매체 소개문은 EXCERPT_STOP_MARKS의
+# 저작권 문구와 안 겹쳐서 필터를 통과했다. 아예 이 도메인은 크롤링을 시도하지 않는다.
+SKIP_CRAWL_DOMAINS = {"v.daum.net", "news.v.daum.net", "n.news.naver.com", "m.news.naver.com"}
 
 
 # =========================
@@ -203,6 +211,9 @@ def resolve_real_url(google_link: str) -> str:
 
 def crawl_excerpt(url: str, title: str) -> str:
     """기사 URL에서 첫 문단을 긁어 짧은 미리보기로 반환. 실패하면 빈 문자열."""
+    domain = urlparse(url).netloc.replace("www.", "")
+    if domain in SKIP_CRAWL_DOMAINS:
+        return ""
     try:
         res = requests.get(
             url,
