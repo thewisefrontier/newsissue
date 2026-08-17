@@ -20,6 +20,10 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    # 잡 전체 강제 타임아웃(기본 360분은 너무 김). 실사고(2026-08-17): Gemini
+    # 폴백 체인(모델 5개×키 2개)이 겹치며 8분 넘게 걸려 사용자가 수동으로 중단함.
+    # 크론 간격(10분)보다 짧게 잡아 다음 사이클과 안 겹치게 한다.
+    timeout-minutes: 8
     steps:
       - name: 코드 체크아웃
         uses: actions/checkout@v5
@@ -75,6 +79,8 @@ jobs:
 
       - name: 속보/단독 수집 및 발송
         if: steps.guard.outputs.skip != 'true'
+        # 스텝 자체에도 타임아웃을 걸어, 파이썬 쪽 시간 예산 로직이 뚫리는 경우를 대비한다.
+        timeout-minutes: 6
         run: python scripts/fetch_news.py
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -83,7 +89,8 @@ jobs:
           GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
 
       - name: state.json 캐시 저장
-        if: steps.guard.outputs.skip != 'true'
+        # 위 스텝이 타임아웃/실패로 중단돼도 그때까지 처리된 상태는 저장한다.
+        if: steps.guard.outputs.skip != 'true' && always()
         uses: actions/cache/save@v6
         with:
           path: data/state.json
