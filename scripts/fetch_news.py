@@ -1,11 +1,12 @@
 """
 scripts/fetch_news.py
 ----------------------
-"뉴스 앤 이슈" 채널용 속보/단독 뉴스 자동 수집·발송.
+"뉴스 앤 이슈" 채널용 속보/단독/종합 뉴스 자동 수집·발송.
 
-소스: 구글 뉴스 검색 RSS ("속보", "단독" 키워드) — 사실상 전체 한국 언론사를 커버.
-필터: 제목에 실제 [속보]/[단독] 대괄호 태그가 붙은 기사만 통과시킨다.
-      (구글 검색은 "단독선두" 같은 일반 단어도 섞어 주므로 태그 정규식으로 재검증 필요)
+소스: 구글 뉴스 검색 RSS ("속보", "단독", "종합" 키워드) — 사실상 전체 한국 언론사를 커버.
+필터: 제목에 실제 [속보]/[단독]/[종합] 대괄호 태그가 붙은 기사만 통과시킨다.
+      (구글 검색은 "단독선두", "종합특검" 같은 일반 단어·복합어도 섞어 주므로
+       태그 정규식으로 재검증 필요 — "종합"은 특히 실측상 100건 중 2건만 진짜 태그)
 중복 제거: 같은 사건을 여러 매체가 거의 동시에 보도하는 경우가 많아,
       NewsFinal의 auto_dedup.py 구조(유사도 임계값 2단계)를 로컬로 이식했다.
       - 최근 발송 목록과 제목 유사도 DUP_SKIP_THRESHOLD 이상 → 완전 중복으로 보고 발송 생략
@@ -23,16 +24,15 @@ scripts/fetch_news.py
       반복적으로 문제(위젯 텍스트 오발송, 사용자가 링크 자체를 원치 않음)가 있어 아예
       발송에서 제외한다(EXCLUDE_LINK_DOMAINS). 메시지에는 raw URL을 노출하지 않고
       제목·"출처"·채널명 단어에 링크를 건다(2026-08-17 사용자 결정).
-본문 요약(2026-08-17 재도입): 정규식으로 "첫 문단"을 고르는 방식은 매체마다 다른 위젯
-      텍스트(읽어주기 서비스, 댓글 안내 등)를 본문으로 오인해 반복적으로 실패했다(다음뉴스·
-      연합뉴스TV·KBS 3건 실사고). 규칙 기반 대신 크롤링한 원문(노이즈 섞여도 무방)을 통째로
-      Gemini에 넘겨 핵심만 2문장으로 뽑게 한다 — LLM은 광고/위젯 텍스트를 의미로 걸러내므로
-      정규식보다 안정적이다. 요약 실패 시(키 없음/쿼터 초과 등) 조용히 건너뛰고 제목/출처/
-      링크만 보낸다(발송 자체는 막지 않는다).
-요약 시간 예산(2026-08-17): 모델 5개×키 2개 폴백 체인이 겹치며 기사 1건 요약에 몇 분씩
-      걸려 전체 실행이 8분 넘게 지연된 실사고가 있었다. 기사 1건당 요약 시도 전체에
-      GEMINI_TIME_BUDGET_SEC 상한을 두고, 넘으면 나머지 모델/키는 건너뛰고 빈 요약으로
-      넘어간다(발송 자체는 막지 않음). 요청 1회 타임아웃도 20→10초로 줄였다.
+본문 요약(2026-08-17 재도입, 이후 단독/종합 전용으로 한정): 정규식으로 "첫 문단"을
+      고르는 방식은 매체마다 다른 위젯 텍스트(읽어주기 서비스, 댓글 안내 등)를 본문으로
+      오인해 반복적으로 실패했다(다음뉴스·연합뉴스TV·KBS 3건 실사고). 규칙 기반 대신
+      크롤링한 원문(노이즈 섞여도 무방)을 통째로 Gemini에 넘겨 핵심만 2문장으로 뽑게
+      한다 — LLM은 광고/위젯 텍스트를 의미로 걸러내므로 정규식보다 안정적이다. 속보는
+      빠른 팩트 전달이 목적이라 크롤링·요약 자체를 안 하고(SUMMARY_CATEGORIES), 링크
+      미리보기(썸네일)도 끈다. 요약 실패 시(키 없음/쿼터 초과/Gemini가 "본문을 확인할
+      수 없다"는 메타 응답을 낸 경우 등) 조용히 건너뛰고 제목/출처/링크만 보낸다(발송
+      자체는 막지 않는다).
 
 실행: python scripts/fetch_news.py
 """
@@ -82,14 +82,19 @@ STATE_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "state.json")
 GOOGLE_NEWS_QUERIES = {
     "속보": "https://news.google.com/rss/search?q=%22%EC%86%8D%EB%B3%B4%22&hl=ko&gl=KR&ceid=KR:ko",
     "단독": "https://news.google.com/rss/search?q=%22%EB%8B%A8%EB%8F%85%22&hl=ko&gl=KR&ceid=KR:ko",
+    "종합": "https://news.google.com/rss/search?q=%22%EC%A2%85%ED%95%A9%22&hl=ko&gl=KR&ceid=KR:ko",
 }
 
-TAG_LABEL_EMOJI = {"속보": "🚨", "단독": "🔍"}
+TAG_LABEL_EMOJI = {"속보": "🚨", "단독": "🔍", "종합": "📋"}
 
-# 대괄호 태그만 인정 — "[속보}" 같은 짝 안 맞는 오타도 허용하되, 일반 단어("단독선두" 등)는 걸러낸다.
+# 대괄호 태그만 인정 — "[속보}" 같은 짝 안 맞는 오타도 허용하되, 일반 단어("단독선두",
+# "종합특검", "종합소득세" 등)는 걸러낸다. 실측(2026-08-17): "종합" 검색 결과 100건 중
+# "[종합]" 태그가 정확히 붙은 건 2건뿐, 나머지는 "종합특검" 같은 복합어라 이 정규식이
+# 필수(느슨하게 하면 관련 없는 기사가 대량 유입됨).
 TAG_RE = {
     "속보": re.compile(r"[\[\【]\s*속보\s*[\]\】\}]"),
     "단독": re.compile(r"[\[\【]\s*단독\s*[\]\】\}]"),
+    "종합": re.compile(r"[\[\【]\s*종합\s*[\]\】\}]"),
 }
 
 # ── 중복 판정 임계값 (NewsFinal auto_dedup.py의 2단계 유사도 구조를 이식) ──
@@ -114,10 +119,14 @@ DEDUP_WINDOW_HOURS = 6      # 이 시간 안에 보낸 기사만 비교 대상�
 # 창 안에서 TOPIC_CAP건 넘게 보냈으면 더 구체적인 사실이 붙어 있어도 생략한다.
 TOPIC_SATURATION_THRESHOLD = 15  # 단어 자카드 유사도(%) — DUP_SKIP보다 훨씬 느슨함
 TOPIC_CAP = 2                    # 같은 주제로 이 창 안에서 보낼 수 있는 최대 건수
-TOPIC_STOPWORDS = {"속보", "단독", "오늘", "발표", "관련", "최근", "이후", "현재"}
+TOPIC_STOPWORDS = {"속보", "단독", "종합", "오늘", "발표", "관련", "최근", "이후", "현재"}
 
 MAX_SEND_PER_RUN = 15       # 텔레그램 flood 방지용 1회 실행 상한
 SEND_INTERVAL_SEC = 1.5     # 발송 간 대기
+
+# 속보는 빠른 팩트 전달이 목적이라 크롤링·요약을 아예 안 한다(비용·시간 절감).
+# 단독·종합은 심층/정리 기사라 요약이 값어치가 있다(2026-08-17 사용자 결정).
+SUMMARY_CATEGORIES = {"단독", "종합"}
 
 # v.daum.net은 반복적으로 문제가 됨(위젯 텍스트 오발송 실사고 + 사용자가 링크
 # 자체를 원치 않음, 2026-08-17). 원문이 이 도메인으로 귀결되면 아예 발송하지 않는다.
@@ -393,6 +402,13 @@ def summarize_with_gemini(title: str, raw_text: str) -> str:
                     continue
                 parts = cand.get("content", {}).get("parts") or []
                 text = "".join(p.get("text", "") for p in parts).strip()
+                # 실사고(2026-08-17): "빈 문자열만 출력해라" 지시를 안 지키고
+                # "본문을 확인할 수 없어 빈 문자열을 출력한다" 같은 설명 문장 자체를
+                # 답으로 낸 사례가 있었다. 그런 메타 발언은 진짜 요약이 아니므로
+                # 빈 값과 동일하게 취급하고 다음 모델로 폴백한다.
+                if text and _looks_like_refusal(text):
+                    print(f"  ⚠️ Gemini({model}) 본문 미확인 메타응답, 폴백: {text[:40]}")
+                    continue
                 if text:
                     _current_key_idx = (idx + 1) % n
                     return text
@@ -400,6 +416,17 @@ def summarize_with_gemini(title: str, raw_text: str) -> str:
                 print(f"  ⚠️ Gemini({model}) 키 {idx+1} 요약 실패: {e}")
                 continue
     return ""
+
+
+_REFUSAL_MARKS = (
+    "확인할 수 없", "찾을 수 없", "추출할 수 없", "포함되어 있지 않",
+    "본문이 없", "제공되지 않", "판단할 수 없", "알 수 없",
+)
+
+
+def _looks_like_refusal(text: str) -> bool:
+    """Gemini가 빈 문자열 대신 낸 '본문을 못 찾았다'류 메타 응답인지 판정."""
+    return any(mark in text for mark in _REFUSAL_MARKS)
 
 
 # =========================
@@ -425,13 +452,16 @@ def send_telegram(item: dict) -> dict:
         f"{summary_block}"
         f"{footer_line}"
     )
+    # 속보는 빠른 팩트 전달이 목적이라 링크 미리보기(썸네일 사진)를 안 보여준다.
+    # 단독은 심층 취재물이라 미리보기가 유용해 그대로 둔다(2026-08-17 사용자 결정).
+    show_preview = item["category"] not in ("속보",)
     res = requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
         data={
             "chat_id": CHAT_ID,
             "text": msg,
             "parse_mode": "HTML",
-            "disable_web_page_preview": False,
+            "disable_web_page_preview": not show_preview,
         },
         timeout=15,
     )
@@ -507,8 +537,12 @@ def run():
             print(f"  🚫 제외 도메인({domain}): {item['title'][:40]}")
             continue
 
-        raw_text = crawl_article_text(item["real_link"])
-        item["summary"] = summarize_with_gemini(item["title"], raw_text)
+        # 속보는 빠른 팩트 전달이 목적이라 요약 없이 바로 보낸다. 단독·종합은 심층/
+        # 정리 기사라 요약이 값어치가 있고, 물량도 적어 크롤링·Gemini 비용도 감당된다
+        # (2026-08-17 사용자 결정).
+        if item["category"] in SUMMARY_CATEGORIES:
+            raw_text = crawl_article_text(item["real_link"])
+            item["summary"] = summarize_with_gemini(item["title"], raw_text)
 
         res = send_telegram(item)
         if res.get("ok"):
