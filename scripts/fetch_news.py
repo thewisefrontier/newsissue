@@ -16,7 +16,7 @@ scripts/fetch_news.py
       실제 언론사 URL을 먼저 알아내 그쪽을 보여준다. v.daum.net으로 귀결되는 기사는
       반복적으로 문제(위젯 텍스트 오발송, 사용자가 링크 자체를 원치 않음)가 있어 아예
       발송에서 제외한다(EXCLUDE_LINK_DOMAINS). 메시지에는 raw URL을 노출하지 않고
-      "출처"·채널명 단어에 링크를 걸어 한 줄로 붙인다(2026-08-17 사용자 결정).
+      제목·"출처"·채널명 단어에 링크를 건다(2026-08-17 사용자 결정).
 본문 요약(2026-08-17 재도입): 정규식으로 "첫 문단"을 고르는 방식은 매체마다 다른 위젯
       텍스트(읽어주기 서비스, 댓글 안내 등)를 본문으로 오인해 반복적으로 실패했다(다음뉴스·
       연합뉴스TV·KBS 3건 실사고). 규칙 기반 대신 크롤링한 원문(노이즈 섞여도 무방)을 통째로
@@ -336,6 +336,9 @@ def send_telegram(item: dict) -> dict:
     emoji = TAG_LABEL_EMOJI.get(item["category"], "📰")
     title_safe = html.escape(item["title"])
     link = item.get("real_link") or item["link"]
+    # 제목도 기사 링크로 건다(2026-08-17 사용자 결정) — 텔레그램 헤드라인 채널의
+    # 일반적인 형태로, 제목 자체를 눌러도 원문으로 이동한다.
+    title_linked = f'<a href="{link}">{title_safe}</a>'
     summary_block = f"\n\n{html.escape(item['summary'])}" if item.get("summary") else ""
     # 출처/채널 링크 둘 다 raw URL 노출 없이 단어에 걸고, 한 줄에 "|"로 붙인다.
     # 카테고리(속보/단독)는 이미 제목 태그에 있어 여기서 반복하지 않는다(2026-08-17 사용자 결정).
@@ -344,7 +347,7 @@ def send_telegram(item: dict) -> dict:
         f"<a href=\"{CHANNEL_URL}\">{CHANNEL_TAG}</a>"
     )
     msg = (
-        f"{emoji} {title_safe}"
+        f"{emoji} {title_linked}"
         f"{summary_block}"
         f"{footer_line}"
     )
