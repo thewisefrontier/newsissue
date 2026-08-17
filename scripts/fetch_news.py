@@ -7,32 +7,31 @@ scripts/fetch_news.py
 필터: 제목에 실제 [속보]/[단독]/[종합] 대괄호 태그가 붙은 기사만 통과시킨다.
       (구글 검색은 "단독선두", "종합특검" 같은 일반 단어·복합어도 섞어 주므로
        태그 정규식으로 재검증 필요 — "종합"은 특히 실측상 100건 중 2건만 진짜 태그)
-중복 제거: 같은 사건을 여러 매체가 거의 동시에 보도하는 경우가 많아,
-      NewsFinal의 auto_dedup.py 구조(유사도 임계값 2단계)를 로컬로 이식했다.
-      - 최근 발송 목록과 제목 유사도 DUP_SKIP_THRESHOLD 이상 → 완전 중복으로 보고 발송 생략
-      - DUP_REVIEW_THRESHOLD~SKIP 미만 → 애매한 경우, 발송은 하되 콘솔/리뷰 로그에 남겨 나중에 임계값 조정 근거로 삼는다
+중복 제거(2단계, 2026-08-17 재설계): 같은 사건을 여러 매체가 거의 동시에, 서로 다른
+      구체 사실(득표율·발언 인용 등)을 섞어 보도하는 경우가 많다.
+      1단계 — 제목만으로 값싸게 거른다(크롤링 없음). 문구까지 거의 같은 명백한 중복만
+        잡는다(DUP_SKIP_THRESHOLD, 문자 3-gram). NewsFinal auto_dedup.py 구조를
+        로컬로 이식한 것.
+      2단계 — 1단계를 통과한 후보만 본문을 크롤링·Gemini 요약한 뒤, 그 요약끼리
+        비교한다(is_summary_duplicate). 제목만으로는 "같은 사건, 다른 표현"과
+        "같은 사건, 다른 후속 사실"을 구분하지 못한다 — 실측(2026-08-17): 문화일보·
+        서울신문이 거의 동일 보도한 "잠실 호텔 탄창 발견"은 제목 유사도 13%로 안
+        걸렸지만 요약끼리는 48.5%로 뚜렷이 잡혔다. 반대로 "김민석 인선" vs "김민석
+        당선"처럼 완전히 다른 사건은 요약 유사도가 0%로 나와, 제목 대신 요약 비교로
+        바꾸면서 개수 캡(주제당 N건) 없이도 진짜 중복만 정확히 거를 수 있게 됐다
+        (캡 방식은 폐기 — 중요한 후속 속보가 개수 제한에 걸려 묻히는 부작용이 있었다).
       (Supabase/Gemini 통합 재작성 단계는 여기선 안 씀 — 우리는 자체 기사를 쓰는 게 아니라
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
-주제 포화 캡(2026-08-17 실사고 대응): "김민석 당대표 선출" 하나로 18건이 나간 사고가
-      있었다. 문자 3-gram 중복판정은 원래 목적대로 정확히 작동했다(같은 사실을 다르게
-      쓴 기사는 안 걸러지는 게 맞음) — 문제는 같은 이슈의 후속 속보 18건이 전부 서로
-      다른 구체 사실(득표율, 경쟁자명, 발언 인용)을 담고 있어 중복 판정 자체가 걸릴 수
-      없는 구조였다는 것. "중복 여부"와 별개로 "이 주제, 최근에 몇 건 보냈나"를 세는
-      is_topic_saturated()를 추가했다(단어 단위 느슨한 겹침 + 창 안 최대 건수 캡).
 링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
-      실제 언론사 URL을 먼저 알아내 그쪽을 보여준다. v.daum.net으로 귀결되는 기사는
-      반복적으로 문제(위젯 텍스트 오발송, 사용자가 링크 자체를 원치 않음)가 있어 아예
-      발송에서 제외한다(EXCLUDE_LINK_DOMAINS). 메시지에는 raw URL을 노출하지 않고
-      제목·"출처"·채널명 단어에 링크를 건다(2026-08-17 사용자 결정).
-본문 요약(2026-08-17 재도입, 이후 단독/종합 전용으로 한정): 정규식으로 "첫 문단"을
-      고르는 방식은 매체마다 다른 위젯 텍스트(읽어주기 서비스, 댓글 안내 등)를 본문으로
-      오인해 반복적으로 실패했다(다음뉴스·연합뉴스TV·KBS 3건 실사고). 규칙 기반 대신
-      크롤링한 원문(노이즈 섞여도 무방)을 통째로 Gemini에 넘겨 핵심만 2문장으로 뽑게
-      한다 — LLM은 광고/위젯 텍스트를 의미로 걸러내므로 정규식보다 안정적이다. 속보는
-      빠른 팩트 전달이 목적이라 크롤링·요약 자체를 안 하고(SUMMARY_CATEGORIES), 링크
-      미리보기(썸네일)도 끈다. 요약 실패 시(키 없음/쿼터 초과/Gemini가 "본문을 확인할
-      수 없다"는 메타 응답을 낸 경우 등) 조용히 건너뛰고 제목/출처/링크만 보낸다(발송
-      자체는 막지 않는다).
+      실제 언론사 URL을 먼저 알아내 그쪽을 보여준다.
+본문 요약: 정규식으로 "첫 문단"을 고르는 방식은 매체마다 다른 위젯 텍스트(읽어주기
+      서비스, 댓글 안내 등)를 본문으로 오인해 반복적으로 실패했다(다음뉴스·연합뉴스TV·
+      KBS 3건 실사고). 규칙 기반 대신 크롤링한 원문(노이즈 섞여도 무방)을 통째로 Gemini에
+      넘겨 핵심만 2문장으로 뽑게 한다 — LLM은 광고/위젯 텍스트를 의미로 걸러내므로 정규식
+      보다 안정적이다. 이제 모든 카테고리(속보 포함)에서 요약을 만든다 — 중복판정에
+      쓰일 뿐 아니라 채널에도 함께 보여준다. 요약 실패 시(키 없음/쿼터 초과/Gemini의
+      "본문을 확인할 수 없다"류 메타응답 등) 조용히 건너뛰고 제목/출처/링크만 보낸다
+      (발송 자체는 막지 않는다).
 
 실행: python scripts/fetch_news.py
 """
@@ -109,24 +108,30 @@ DUP_SKIP_THRESHOLD = 40     # 이상이면 완전 중복(문구까지 거의 동
 DUP_REVIEW_THRESHOLD = 25   # 이상~SKIP 미만이면 애매함 → 발송하되 리뷰 로그에 기록
 DEDUP_WINDOW_HOURS = 6      # 이 시간 안에 보낸 기사만 비교 대상으로 삼는다
 
-# ── 주제 포화 캡(2026-08-17 실사고 대응) ──────────────────────────────
-# "김민석 당대표 선출" 하나로 18건이 나간 사고가 있었다. 문자 3-gram 중복판정은
-# 원래 목적대로 정확히 작동했다(같은 사실을 다르게 쓴 기사는 안 걸러지는 게 맞음) —
-# 문제는 애초에 "같은 이슈의 후속 속보 18건"이 전부 서로 다른 구체 사실(득표율,
-# 경쟁자명, 발언 인용)을 담고 있어 중복 판정 자체가 걸릴 수 없는 구조였다는 것.
-# 그래서 "중복 여부"와는 별개로 "이 주제, 최근에 몇 건 보냈나"를 센다 — 단어 단위
-# 키워드 겹침(느슨한 기준, TOPIC_SATURATION_THRESHOLD)으로 같은 주제를 감지하고,
-# 창 안에서 TOPIC_CAP건 넘게 보냈으면 더 구체적인 사실이 붙어 있어도 생략한다.
-TOPIC_SATURATION_THRESHOLD = 15  # 단어 자카드 유사도(%) — DUP_SKIP보다 훨씬 느슨함
-TOPIC_CAP = 2                    # 같은 주제로 이 창 안에서 보낼 수 있는 최대 건수
+# ── 본문 요약 기반 중복판정(2026-08-17, 주제 포화 캡을 대체) ────────────
+# 처음엔 "제목 캡"(주제당 최근 N건까지만)으로 "김민석 당대표 선출" 18건 폭주를
+# 막았는데, 사용자가 두 가지 문제를 지적했다:
+#   1) "잠실 5성 호텔 탄창 발견"을 문화일보·서울신문이 거의 동일하게 보도했는데
+#      제목 단어 자카드가 13.3%로 기준(15%)에 살짝 못 미쳐 캡을 2→1로 낮춰도
+#      여전히 둘 다 통과할 뻔했다 — 제목만으로는 근본적으로 한계가 있다.
+#   2) 캡은 "몇 건째냐"만 볼 뿐 실제로 중복인지 안 보므로, 정말 새로운 사실이
+#      담긴 중요한 후속 속보까지 개수 제한에 걸려 묻힐 위험이 있다.
+# 그래서 제목 대신 "본문을 크롤링해 Gemini로 뽑은 요약"끼리 비교하는 방식으로
+# 바꿨다. 실측(2026-08-17): 같은 사건 다른 매체 요약끼리는 단어 자카드 48.5%·
+# 문자 3-gram 32%인 반면, 같은 인물의 완전히 다른 사건(김민석 인선 vs 당선)
+# 요약끼리는 0%/0% — 제목보다 훨씬 뚜렷하게 갈린다. 이제 캡이 아니라 "실제로
+# 내용이 겹치는지"로 판단하므로 중요한 후속 속보를 개수 제한으로 놓칠 일이 없다.
+SUMMARY_WORD_JACCARD_THRESHOLD = 25  # 이상이면 중복(단어 단위, 조사 변화에 강함)
+SUMMARY_CHAR_TRIGRAM_THRESHOLD = 18  # 이상이면 중복(문자 단위) — 둘 중 하나만 넘어도 중복 처리
 TOPIC_STOPWORDS = {"속보", "단독", "종합", "오늘", "발표", "관련", "최근", "이후", "현재"}
 
-MAX_SEND_PER_RUN = 15       # 텔레그램 flood 방지용 1회 실행 상한
-SEND_INTERVAL_SEC = 1.5     # 발송 간 대기
+MAX_SEND_PER_RUN = 15        # 텔레그램 flood 방지용 1회 실행 발송 상한
+MAX_SUMMARIZE_PER_RUN = 20   # 크롤링·Gemini 요약을 시도할 후보 상한(비용 상한)
+SEND_INTERVAL_SEC = 1.5      # 발송 간 대기
 
-# 속보는 빠른 팩트 전달이 목적이라 크롤링·요약을 아예 안 한다(비용·시간 절감).
-# 단독·종합은 심층/정리 기사라 요약이 값어치가 있다(2026-08-17 사용자 결정).
-SUMMARY_CATEGORIES = {"단독", "종합"}
+# 모든 카테고리에서 요약을 만든다(2026-08-17) — 중복판정에 요약이 필요해졌고,
+# 사용자도 속보에 요약이 붙는 걸 확인하고 괜찮다고 했다. 비용은 늘지만
+# (RPD 여유는 키 2개로 확보) 정확한 중복 제거가 우선이라는 판단.
 
 # v.daum.net은 반복적으로 문제가 됨(위젯 텍스트 오발송 실사고 + 사용자가 링크
 # 자체를 원치 않음, 2026-08-17). 원문이 이 도메인으로 귀결되면 아예 발송하지 않는다.
@@ -227,22 +232,29 @@ def word_jaccard(a: str, b: str) -> float:
     return len(ka & kb) / len(ka | kb) * 100
 
 
-def is_topic_saturated(title: str, category: str, recent: list) -> bool:
-    """같은 주제(느슨한 단어 겹침)로 최근 TOPIC_CAP건 이상 이미 보냈으면 True.
+def is_summary_duplicate(text: str, category: str, recent: list):
+    """요약(또는 요약 실패 시 제목)을 최근 발송분과 비교. (is_dup, score, matched) 반환.
 
-    실사고(2026-08-17): "김민석 당대표 선출" 하나로 18건이 나감 — 각 기사가 서로
-    다른 구체 사실(득표율, 발언 등)을 담고 있어 is_duplicate()의 엄격한 기준(40%)에
-    안 걸렸다. 이건 그 빈틈을 메우는 별도 체크다.
+    제목 기반 is_duplicate()보다 훨씬 정확하다 — 실측(2026-08-17): 같은 사건을
+    다르게 쓴 제목은 자카드 13~15%로 갈렸지만, 같은 사건의 요약끼리는 48.5%,
+    완전히 다른 사건의 요약끼리는 0%로 훨씬 뚜렷하게 갈린다.
     """
-    count = 0
+    best_wj, best_ct, best_text = 0.0, 0.0, ""
     for item in recent:
         if item.get("category") != category:
             continue
-        if word_jaccard(title, item["title"]) >= TOPIC_SATURATION_THRESHOLD:
-            count += 1
-            if count >= TOPIC_CAP:
-                return True
-    return False
+        other = item.get("summary") or item["title"]
+        wj = word_jaccard(text, other)
+        ct = title_similarity(text, other)
+        if wj > best_wj or ct > best_ct:
+            if wj >= best_wj:
+                best_wj = wj
+            if ct >= best_ct:
+                best_ct = ct
+            best_text = other
+    is_dup = (best_wj >= SUMMARY_WORD_JACCARD_THRESHOLD
+              or best_ct >= SUMMARY_CHAR_TRIGRAM_THRESHOLD)
+    return is_dup, round(best_wj, 1), round(best_ct, 1), best_text
 
 
 # =========================
@@ -484,72 +496,74 @@ def run():
     dedup_cutoff = (now_kst() - timedelta(hours=DEDUP_WINDOW_HOURS)).isoformat()
     recent_for_dedup = [s for s in state["sent"] if s["sent_at"] >= dedup_cutoff]
 
-    to_send = []
+    # ── 1단계: 제목만으로 값싸게 걸러낸다(크롤링·Gemini 호출 없음) ──
+    # 여기서 걸러지는 건 문구까지 거의 동일한 명백한 중복뿐이다(DUP_SKIP_THRESHOLD).
+    stage1 = []
     review_log = []
-    topic_skipped_guids = []
-
     for category, url in GOOGLE_NEWS_QUERIES.items():
         candidates = fetch_candidates(category, url)
         print(f"[{category}] 후보 {len(candidates)}건 (태그 필터 통과분)")
 
         for c in candidates:
             if c["guid"] in sent_guids:
-                continue  # 이미 보낸 기사(같은 기사 재수집)
+                continue  # 이미 처리한 기사(같은 기사 재수집)
 
             is_dup, score, matched = is_duplicate(c["title"], category, recent_for_dedup)
             if is_dup:
-                print(f"  ⏭️  중복 생략 ({score}%): {c['title'][:40]} ≈ {matched[:40]}")
-                continue
-
-            if is_topic_saturated(c["title"], category, recent_for_dedup):
-                print(f"  🧯 주제 포화(최근 {TOPIC_CAP}건 이상 발송) 생략: {c['title'][:40]}")
-                # 재수집 방지를 위해 기록(발송은 안 됐지만 guid는 처리된 것으로 남긴다).
-                topic_skipped_guids.append({
-                    "guid": c["guid"], "title": c["title"], "category": category,
-                    "sent_at": now_kst().isoformat(),
-                })
+                print(f"  ⏭️  제목 중복 생략 ({score}%): {c['title'][:40]} ≈ {matched[:40]}")
                 continue
 
             if DUP_REVIEW_THRESHOLD <= score < DUP_SKIP_THRESHOLD:
                 review_log.append({"title": c["title"], "matched": matched, "score": score})
 
-            to_send.append(c)
-            # 이번 실행 안에서 뽑은 기사끼리도 서로 중복/주제포화 비교 대상에 넣는다
-            recent_for_dedup.append({"title": c["title"], "category": category,
-                                      "sent_at": now_kst().isoformat()})
+            stage1.append(c)
+
+    stage1 = stage1[:MAX_SUMMARIZE_PER_RUN]
+    print(f"본문 확인 대상 {len(stage1)}건 (상한 {MAX_SUMMARIZE_PER_RUN}건)")
+
+    # ── 2단계: 본문을 크롤링·요약해 진짜 중복인지 정확하게 판정한다 ──
+    to_send = []
+    processed = []  # 발송은 안 됐지만 재수집 방지를 위해 처리된 것으로 기록할 항목
+
+    for c in stage1:
+        c["real_link"] = resolve_real_url(c["link"])
+
+        domain = urlparse(c["real_link"]).netloc.replace("www.", "")
+        if domain in EXCLUDE_LINK_DOMAINS:
+            print(f"  🚫 제외 도메인({domain}): {c['title'][:40]}")
+            processed.append({"guid": c["guid"], "title": c["title"], "category": c["category"],
+                               "sent_at": now_kst().isoformat()})
+            continue
+
+        raw_text = crawl_article_text(c["real_link"])
+        c["summary"] = summarize_with_gemini(c["title"], raw_text)
+        compare_text = c["summary"] or c["title"]  # 요약 실패 시 제목으로라도 비교
+
+        is_dup2, wj, ct, matched2 = is_summary_duplicate(compare_text, c["category"], recent_for_dedup)
+        if is_dup2:
+            print(f"  ⏭️  본문 중복 생략(단어 {wj}%/문자 {ct}%): {c['title'][:40]} ≈ {matched2[:40]}")
+            processed.append({"guid": c["guid"], "title": c["title"], "category": c["category"],
+                               "sent_at": now_kst().isoformat()})
+            continue
+
+        to_send.append(c)
+        # 이번 실행 안에서 뽑은 기사끼리도 서로 비교 대상에 넣는다(요약 캐시 포함).
+        recent_for_dedup.append({"title": c["title"], "summary": c["summary"], "category": c["category"],
+                                  "sent_at": now_kst().isoformat()})
 
     to_send = to_send[:MAX_SEND_PER_RUN]
     print(f"발송 대상 {len(to_send)}건 (상한 {MAX_SEND_PER_RUN}건)")
 
-    state["sent"].extend(topic_skipped_guids)
+    state["sent"].extend(processed)
 
     sent_count = 0
     for item in to_send:
-        item["real_link"] = resolve_real_url(item["link"])
-
-        domain = urlparse(item["real_link"]).netloc.replace("www.", "")
-        if domain in EXCLUDE_LINK_DOMAINS:
-            # 발송은 생략하지만 guid는 기록해서 다음 실행에 다시 후보로 안 올라오게 한다.
-            state["sent"].append({
-                "guid": item["guid"], "title": item["title"], "category": item["category"],
-                "sent_at": now_kst().isoformat(),
-            })
-            print(f"  🚫 제외 도메인({domain}): {item['title'][:40]}")
-            continue
-
-        # 속보는 빠른 팩트 전달이 목적이라 요약 없이 바로 보낸다. 단독·종합은 심층/
-        # 정리 기사라 요약이 값어치가 있고, 물량도 적어 크롤링·Gemini 비용도 감당된다
-        # (2026-08-17 사용자 결정).
-        if item["category"] in SUMMARY_CATEGORIES:
-            raw_text = crawl_article_text(item["real_link"])
-            item["summary"] = summarize_with_gemini(item["title"], raw_text)
-
         res = send_telegram(item)
         if res.get("ok"):
             sent_count += 1
             state["sent"].append({
-                "guid": item["guid"], "title": item["title"], "category": item["category"],
-                "sent_at": now_kst().isoformat(),
+                "guid": item["guid"], "title": item["title"], "summary": item.get("summary", ""),
+                "category": item["category"], "sent_at": now_kst().isoformat(),
             })
             print(f"  ✅ [{item['category']}] {item['title'][:50]}")
         else:
@@ -559,7 +573,7 @@ def run():
     save_state(state)
 
     if review_log:
-        print(f"\n⚠️ 애매한 유사도({DUP_REVIEW_THRESHOLD}~{DUP_SKIP_THRESHOLD}%) 발송분 {len(review_log)}건 — 임계값 조정 참고용")
+        print(f"\n⚠️ 애매한 제목 유사도({DUP_REVIEW_THRESHOLD}~{DUP_SKIP_THRESHOLD}%) 통과분 {len(review_log)}건 — 임계값 조정 참고용")
         for r in review_log:
             print(f"   {r['score']}% : {r['title'][:35]} ≈ {r['matched'][:35]}")
 
