@@ -283,10 +283,10 @@ def summarize_with_gemini(title: str, raw_text: str) -> str:
     )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        # maxOutputTokens=200은 3.x 계열(내부 추론에 토큰을 먼저 쓰는 "thinking"
-        # 모델)에서 답변 전에 토큰이 바닥나 parts가 비는 원인이었다(실측 2026-08-17).
-        # NewsFinal(gemini_summarizer.py)과 같은 500으로 맞춘다.
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 500},
+        # 3.x 계열은 "thinking" 모델이라 maxOutputTokens 예산을 답변 전에 내부 추론이
+        # 먼저 소비한다. 실측(2026-08-17): 500으로는 사고에 481~714토큰을 다 써버려
+        # MAX_TOKENS로 잘림. 1500에서부터 정상 STOP 확인, 여유를 두어 2048로 설정.
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
     }
 
     n = len(GEMINI_API_KEYS)
@@ -312,13 +312,18 @@ def summarize_with_gemini(title: str, raw_text: str) -> str:
                 if res.status_code != 200:
                     print(f"  ⚠️ Gemini({model}) 키 {idx+1} HTTP {res.status_code}, 폴백")
                     continue
-                cand = res.json()["candidates"][0]
+                candidates = res.json().get("candidates") or []
+                if not candidates:
+                    print(f"  ⚠️ Gemini({model}) 키 {idx+1} candidates 없음(안전 차단 등), 폴백")
+                    continue
+                cand = candidates[0]
                 # MAX_TOKENS 등으로 잘린 응답은 버린다(끊긴 문장 발송 사고 방지).
                 finish = cand.get("finishReason", "")
                 if finish and finish != "STOP":
                     print(f"  ⚠️ Gemini({model}) 비정상 종료(finishReason={finish}), 폴백")
                     continue
-                text = "".join(p.get("text", "") for p in cand["content"]["parts"]).strip()
+                parts = cand.get("content", {}).get("parts") or []
+                text = "".join(p.get("text", "") for p in parts).strip()
                 if text:
                     _current_key_idx = (idx + 1) % n
                     return text
