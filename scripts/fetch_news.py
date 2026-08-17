@@ -12,6 +12,12 @@ scripts/fetch_news.py
       - DUP_REVIEW_THRESHOLD~SKIP 미만 → 애매한 경우, 발송은 하되 콘솔/리뷰 로그에 남겨 나중에 임계값 조정 근거로 삼는다
       (Supabase/Gemini 통합 재작성 단계는 여기선 안 씀 — 우리는 자체 기사를 쓰는 게 아니라
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
+주제 포화 캡(2026-08-17 실사고 대응): "김민석 당대표 선출" 하나로 18건이 나간 사고가
+      있었다. 문자 3-gram 중복판정은 원래 목적대로 정확히 작동했다(같은 사실을 다르게
+      쓴 기사는 안 걸러지는 게 맞음) — 문제는 같은 이슈의 후속 속보 18건이 전부 서로
+      다른 구체 사실(득표율, 경쟁자명, 발언 인용)을 담고 있어 중복 판정 자체가 걸릴 수
+      없는 구조였다는 것. "중복 여부"와 별개로 "이 주제, 최근에 몇 건 보냈나"를 세는
+      is_topic_saturated()를 추가했다(단어 단위 느슨한 겹침 + 창 안 최대 건수 캡).
 링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
       실제 언론사 URL을 먼저 알아내 그쪽을 보여준다. v.daum.net으로 귀결되는 기사는
       반복적으로 문제(위젯 텍스트 오발송, 사용자가 링크 자체를 원치 않음)가 있어 아예
@@ -98,6 +104,18 @@ DUP_SKIP_THRESHOLD = 40     # 이상이면 완전 중복(문구까지 거의 동
 DUP_REVIEW_THRESHOLD = 25   # 이상~SKIP 미만이면 애매함 → 발송하되 리뷰 로그에 기록
 DEDUP_WINDOW_HOURS = 6      # 이 시간 안에 보낸 기사만 비교 대상으로 삼는다
 
+# ── 주제 포화 캡(2026-08-17 실사고 대응) ──────────────────────────────
+# "김민석 당대표 선출" 하나로 18건이 나간 사고가 있었다. 문자 3-gram 중복판정은
+# 원래 목적대로 정확히 작동했다(같은 사실을 다르게 쓴 기사는 안 걸러지는 게 맞음) —
+# 문제는 애초에 "같은 이슈의 후속 속보 18건"이 전부 서로 다른 구체 사실(득표율,
+# 경쟁자명, 발언 인용)을 담고 있어 중복 판정 자체가 걸릴 수 없는 구조였다는 것.
+# 그래서 "중복 여부"와는 별개로 "이 주제, 최근에 몇 건 보냈나"를 센다 — 단어 단위
+# 키워드 겹침(느슨한 기준, TOPIC_SATURATION_THRESHOLD)으로 같은 주제를 감지하고,
+# 창 안에서 TOPIC_CAP건 넘게 보냈으면 더 구체적인 사실이 붙어 있어도 생략한다.
+TOPIC_SATURATION_THRESHOLD = 15  # 단어 자카드 유사도(%) — DUP_SKIP보다 훨씬 느슨함
+TOPIC_CAP = 2                    # 같은 주제로 이 창 안에서 보낼 수 있는 최대 건수
+TOPIC_STOPWORDS = {"속보", "단독", "오늘", "발표", "관련", "최근", "이후", "현재"}
+
 MAX_SEND_PER_RUN = 15       # 텔레그램 flood 방지용 1회 실행 상한
 SEND_INTERVAL_SEC = 1.5     # 발송 간 대기
 
@@ -183,6 +201,39 @@ def is_duplicate(title: str, category: str, recent: list):
         if score > best_score:
             best_score, best_title = score, item["title"]
     return best_score >= DUP_SKIP_THRESHOLD, round(best_score, 1), best_title
+
+
+def _keywords(title: str) -> set:
+    """제목에서 태그·불용어를 뺀 2글자 이상 단어 토큰 집합. 주제 포화 판정용."""
+    t = re.sub(r"[\[\【][^\]\】]*[\]\】]", "", title or "")
+    toks = re.findall(r"[가-힣A-Za-z0-9]{2,}", t)
+    return {w for w in toks if w not in TOPIC_STOPWORDS}
+
+
+def word_jaccard(a: str, b: str) -> float:
+    """단어 단위 Jaccard 유사도(0~100). 조사 변화에 강하지만 느슨해서 주제 포화 판정 전용."""
+    ka, kb = _keywords(a), _keywords(b)
+    if not ka or not kb:
+        return 0.0
+    return len(ka & kb) / len(ka | kb) * 100
+
+
+def is_topic_saturated(title: str, category: str, recent: list) -> bool:
+    """같은 주제(느슨한 단어 겹침)로 최근 TOPIC_CAP건 이상 이미 보냈으면 True.
+
+    실사고(2026-08-17): "김민석 당대표 선출" 하나로 18건이 나감 — 각 기사가 서로
+    다른 구체 사실(득표율, 발언 등)을 담고 있어 is_duplicate()의 엄격한 기준(40%)에
+    안 걸렸다. 이건 그 빈틈을 메우는 별도 체크다.
+    """
+    count = 0
+    for item in recent:
+        if item.get("category") != category:
+            continue
+        if word_jaccard(title, item["title"]) >= TOPIC_SATURATION_THRESHOLD:
+            count += 1
+            if count >= TOPIC_CAP:
+                return True
+    return False
 
 
 # =========================
@@ -405,6 +456,7 @@ def run():
 
     to_send = []
     review_log = []
+    topic_skipped_guids = []
 
     for category, url in GOOGLE_NEWS_QUERIES.items():
         candidates = fetch_candidates(category, url)
@@ -419,16 +471,27 @@ def run():
                 print(f"  ⏭️  중복 생략 ({score}%): {c['title'][:40]} ≈ {matched[:40]}")
                 continue
 
+            if is_topic_saturated(c["title"], category, recent_for_dedup):
+                print(f"  🧯 주제 포화(최근 {TOPIC_CAP}건 이상 발송) 생략: {c['title'][:40]}")
+                # 재수집 방지를 위해 기록(발송은 안 됐지만 guid는 처리된 것으로 남긴다).
+                topic_skipped_guids.append({
+                    "guid": c["guid"], "title": c["title"], "category": category,
+                    "sent_at": now_kst().isoformat(),
+                })
+                continue
+
             if DUP_REVIEW_THRESHOLD <= score < DUP_SKIP_THRESHOLD:
                 review_log.append({"title": c["title"], "matched": matched, "score": score})
 
             to_send.append(c)
-            # 이번 실행 안에서 뽑은 기사끼리도 서로 중복 비교 대상에 넣는다
+            # 이번 실행 안에서 뽑은 기사끼리도 서로 중복/주제포화 비교 대상에 넣는다
             recent_for_dedup.append({"title": c["title"], "category": category,
                                       "sent_at": now_kst().isoformat()})
 
     to_send = to_send[:MAX_SEND_PER_RUN]
     print(f"발송 대상 {len(to_send)}건 (상한 {MAX_SEND_PER_RUN}건)")
+
+    state["sent"].extend(topic_skipped_guids)
 
     sent_count = 0
     for item in to_send:
