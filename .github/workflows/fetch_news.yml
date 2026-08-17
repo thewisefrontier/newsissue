@@ -8,10 +8,11 @@ on:
     - cron: '3,13,23,33,43,53 * * * *'
   workflow_dispatch:
 
+# state.json을 더 이상 저장소에 커밋하지 않는다(캐시로 전환) — 쓰기 권한 불필요.
 permissions:
-  contents: write
+  contents: read
 
-# 이전 실행이 아직 안 끝났으면 새 실행은 대기(취소 아님) — 커밋이 겹치지 않게.
+# 이전 실행이 아직 안 끝났으면 새 실행은 대기(취소 아님) — 캐시 저장이 겹치지 않게.
 concurrency:
   group: newsissue-fetch
   cancel-in-progress: false
@@ -22,22 +23,40 @@ jobs:
     steps:
       - name: 코드 체크아웃
         uses: actions/checkout@v5
-        with:
-          ref: main
-          fetch-depth: 50
 
-      # 스케줄 지연으로 트리거가 몰릴 수 있어, 직전 커밋이 너무 최근이면 건너뛴다.
-      - name: 중복 실행 가드 (직전 커밋 후 3분 미만이면 스킵)
+      # state.json은 이제 git 커밋이 아니라 Actions 캐시로 실행 간에 이어간다.
+      # 캐시는 같은 키로 덮어쓸 수 없어서(불변) 저장은 매번 새 키(run_id)로 하고,
+      # 복원은 "state-" 접두사로 가장 최근 캐시를 가져온다(restore-keys의 표준 패턴).
+      - name: state.json 캐시 복원
+        id: cache-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: data/state.json
+          key: state-${{ github.run_id }}
+          restore-keys: |
+            state-
+
+      # 스케줄 지연으로 트리거가 몰릴 수 있어, 직전 캐시가 너무 최근이면 건너뛴다.
+      # (git 커밋 기반 가드였던 걸 캐시 파일의 마지막 sent_at 기준으로 대체)
+      - name: 중복 실행 가드 (직전 발송 후 3분 미만이면 스킵)
         id: guard
         if: github.event_name == 'schedule'
         run: |
-          last=$(git log -1 --format=%cI --grep='^Update state$' || true)
+          last=$(python3 -c "
+          import json, sys
+          try:
+              d = json.load(open('data/state.json'))
+              sent = d.get('sent', [])
+              print(max(s['sent_at'] for s in sent) if sent else '')
+          except Exception:
+              print('')
+          " 2>/dev/null)
           if [ -z "$last" ]; then
-            echo "직전 커밋 없음 -> 진행"
+            echo "직전 발송 기록 없음 -> 진행"
             exit 0
           fi
           d=$(( ( $(date -u +%s) - $(date -u -d "$last" +%s) ) / 60 ))
-          echo "직전 커밋: $last (${d}분 전)"
+          echo "직전 발송: $last (${d}분 전)"
           if [ "$d" -lt 3 ]; then
             echo "3분 이내 -> 이번 실행은 스킵"
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -61,12 +80,9 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
 
-      - name: 상태 커밋 및 푸시
+      - name: state.json 캐시 저장
         if: steps.guard.outputs.skip != 'true'
-        run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add data/state.json
-          git diff --staged --quiet || git commit -m "Update state"
-          git pull origin main --rebase --strategy-option=theirs || true
-          git push --force-with-lease
+        uses: actions/cache/save@v6
+        with:
+          path: data/state.json
+          key: state-${{ github.run_id }}
