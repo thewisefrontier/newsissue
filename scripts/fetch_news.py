@@ -32,6 +32,10 @@ scripts/fetch_news.py
       쓰일 뿐 아니라 채널에도 함께 보여준다. 요약 실패 시(키 없음/쿼터 초과/Gemini의
       "본문을 확인할 수 없다"류 메타응답 등) 조용히 건너뛰고 제목/출처/링크만 보낸다
       (발송 자체는 막지 않는다).
+모델 라우팅(2026-08-17): 단독만 상위 모델(3.7→3.6→3.5→lite)까지 다 시도하고,
+      속보·종합은 처음부터 라이트 모델로 직행한다. 물량이 많은 속보·종합이 자주
+      실패하는 상위 모델(503/타임아웃)에서 시간을 허비하지 않게 하는 동시에,
+      상위 모델 RPD를 물량 적은 단독에 집중해서 아낀다.
 
 실행: python scripts/fetch_news.py
 """
@@ -69,9 +73,21 @@ CHAT_ID = os.getenv("CHAT_ID", "")
 # 바쁜 날 500 한도에 걸릴 수 있어 2개로 시작(2026-08-17 사용자 결정).
 GEMINI_API_KEYS = [k for k in [os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_2")] if k]
 
-# 최신 → 구버전 순 폴백 (NewsFinal gemini_summarizer.py와 동일한 검증된 순서)
-GEMINI_MODELS = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
-                  "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+# 최신 → 구버전 순 폴백 (NewsFinal gemini_summarizer.py와 동일한 검증된 순서).
+# 단독은 물량이 적고 심층 취재물이라 상위 모델까지 다 시도할 값어치가 있다.
+# 속보·종합은 물량이 많고 빠른 처리가 우선이라(실측: 3.7/3.6/3.5는 503·타임아웃이
+# 잦아 여기서 시간만 잡아먹음) 처음부터 라이트 모델로 바로 간다(2026-08-17 사용자
+# 결정) — 상위 모델 RPD도 단독에 집중해서 아낄 수 있다.
+GEMINI_MODELS_FULL = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
+                       "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+GEMINI_MODELS_LITE = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+GEMINI_MODELS_BY_CATEGORY = {"단독": GEMINI_MODELS_FULL}  # 그 외 카테고리는 LITE
+
+
+def _models_for_category(category: str) -> list:
+    return GEMINI_MODELS_BY_CATEGORY.get(category, GEMINI_MODELS_LITE)
+
+
 CHANNEL_TAG = "뉴스앤이슈"
 CHANNEL_URL = "https://t.me/news_issue"
 
@@ -341,12 +357,13 @@ def crawl_article_text(url: str) -> str:
 
 
 # 모델별로 RPD(429)가 소진된 키를 기록 — 이 프로세스(=1회 실행) 동안만 유효.
-# NewsFinal(gemini_summarizer.py)과 같은 구조.
-_exhausted_keys = {m: set() for m in GEMINI_MODELS}
+# NewsFinal(gemini_summarizer.py)과 같은 구조. FULL/LITE 두 목록의 합집합을 키로 둔다.
+_ALL_GEMINI_MODELS = sorted(set(GEMINI_MODELS_FULL) | set(GEMINI_MODELS_LITE))
+_exhausted_keys = {m: set() for m in _ALL_GEMINI_MODELS}
 _current_key_idx = 0
 
 
-def summarize_with_gemini(title: str, raw_text: str) -> str:
+def summarize_with_gemini(title: str, raw_text: str, category: str = "") -> str:
     """크롤링한 원문을 Gemini로 2문장 요약. 실패하면 빈 문자열(발송은 계속 진행)."""
     global _current_key_idx
     if not GEMINI_API_KEYS or not raw_text:
@@ -374,7 +391,7 @@ def summarize_with_gemini(title: str, raw_text: str) -> str:
 
     n = len(GEMINI_API_KEYS)
     start = time.monotonic()
-    for model in GEMINI_MODELS:
+    for model in _models_for_category(category):
         if time.monotonic() - start > GEMINI_TIME_BUDGET_SEC:
             print(f"  ⏱️ 요약 시간 예산({GEMINI_TIME_BUDGET_SEC}초) 초과, 남은 모델 건너뜀")
             break
@@ -536,7 +553,7 @@ def run():
             continue
 
         raw_text = crawl_article_text(c["real_link"])
-        c["summary"] = summarize_with_gemini(c["title"], raw_text)
+        c["summary"] = summarize_with_gemini(c["title"], raw_text, c["category"])
         compare_text = c["summary"] or c["title"]  # 요약 실패 시 제목으로라도 비교
 
         is_dup2, wj, ct, matched2 = is_summary_duplicate(compare_text, c["category"], recent_for_dedup)
