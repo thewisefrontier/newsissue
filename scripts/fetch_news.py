@@ -11,7 +11,11 @@ scripts/fetch_news.py
       구체 사실(득표율·발언 인용 등)을 섞어 보도하는 경우가 많다.
       1단계 — 제목만으로 값싸게 거른다(크롤링 없음). 문구까지 거의 같은 명백한 중복만
         잡는다(DUP_SKIP_THRESHOLD, 문자 3-gram). NewsFinal auto_dedup.py 구조를
-        로컬로 이식한 것.
+        로컬로 이식한 것. ⚠️ 같은 배치(이번 실행) 안에서 뽑힌 후보끼리도 반드시
+        recent_for_dedup에 누적하며 비교해야 한다 — 안 그러면 "과거 발송 이력"하고만
+        비교돼서 같은 배치 안의 완전 동일 제목도 못 잡는다(실사고 2026-08-17: 중앙일보·
+        조선비즈가 100% 동일 제목 "종합특검, '관저 이전 의혹' 김건희·윤한홍 기소"로
+        나란히 발송됨).
       2단계 — 1단계를 통과한 후보만 본문을 크롤링·Gemini 요약한 뒤, 그 요약끼리
         비교한다(is_summary_duplicate). 제목만으로는 "같은 사건, 다른 표현"과
         "같은 사건, 다른 후속 사실"을 구분하지 못한다 — 실측(2026-08-17): 문화일보·
@@ -556,6 +560,10 @@ def run():
 
     # ── 1단계: 제목만으로 값싸게 걸러낸다(크롤링·Gemini 호출 없음) ──
     # 여기서 걸러지는 건 문구까지 거의 동일한 명백한 중복뿐이다(DUP_SKIP_THRESHOLD).
+    # 실사고(2026-08-17): 이 루프가 recent_for_dedup에 추가를 안 해서, 같은 배치 안의
+    # 후보끼리는 서로 비교가 안 되고 "과거 발송 이력"하고만 비교됐다. 그 결과 중앙일보·
+    # 조선비즈가 완전히 동일한 제목("종합특검, '관저 이전 의혹' 김건희·윤한홍 기소")으로
+    # 올라온 것도 안 걸러짐 — 같은 실행 안에서 뽑힌 후보끼리도 반드시 서로 비교해야 한다.
     stage1 = []
     review_log = []
     for category, url in GOOGLE_NEWS_QUERIES.items():
@@ -575,6 +583,9 @@ def run():
                 review_log.append({"title": c["title"], "matched": matched, "score": score})
 
             stage1.append(c)
+            # 이번 배치 안의 다른 후보와도 비교되도록 즉시 추가한다(위 실사고의 원인).
+            recent_for_dedup.append({"title": c["title"], "category": category,
+                                      "sent_at": now_kst().isoformat()})
 
     stage1 = stage1[:MAX_SUMMARIZE_PER_RUN]
     print(f"본문 확인 대상 {len(stage1)}건 (상한 {MAX_SUMMARIZE_PER_RUN}건)")
