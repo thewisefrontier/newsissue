@@ -24,6 +24,12 @@ scripts/fetch_news.py
         당선"처럼 완전히 다른 사건은 요약 유사도가 0%로 나와, 제목 대신 요약 비교로
         바꾸면서 개수 캡(주제당 N건) 없이도 진짜 중복만 정확히 거를 수 있게 됐다
         (캡 방식은 폐기 — 중요한 후속 속보가 개수 제한에 걸려 묻히는 부작용이 있었다).
+        비교 지표는 Jaccard가 아니라 오버랩 계수(교집합/작은쪽 집합 크기)를 쓴다 —
+        실사고(2026-08-18): 경향신문(사직 배경·인사 절차까지 상세)과 조선일보(발언
+        요지만 간략)처럼 두 매체 요약 분량이 크게 다르면, 짧은 쪽에 없는 단어까지
+        분모(합집합)에 들어가는 Jaccard는 진짜 중복인데도 13.2%/10.0%로 낮게 나와
+        임계값을 통과시켰다. 오버랩 계수는 같은 데이터에서 38.5%/32.5%로 뚜렷이
+        잡힌다(word_overlap/char_trigram_overlap 참고).
       (Supabase/Gemini 통합 재작성 단계는 여기선 안 씀 — 우리는 자체 기사를 쓰는 게 아니라
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
 링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
@@ -147,8 +153,19 @@ DEDUP_WINDOW_HOURS = 6      # 이 시간 안에 보낸 기사만 비교 대상�
 # 문자 3-gram 32%인 반면, 같은 인물의 완전히 다른 사건(김민석 인선 vs 당선)
 # 요약끼리는 0%/0% — 제목보다 훨씬 뚜렷하게 갈린다. 이제 캡이 아니라 "실제로
 # 내용이 겹치는지"로 판단하므로 중요한 후속 속보를 개수 제한으로 놓칠 일이 없다.
-SUMMARY_WORD_JACCARD_THRESHOLD = 25  # 이상이면 중복(단어 단위, 조사 변화에 강함)
-SUMMARY_CHAR_TRIGRAM_THRESHOLD = 18  # 이상이면 중복(문자 단위) — 둘 중 하나만 넘어도 중복 처리
+#
+# 실사고(2026-08-18): 경향신문·조선일보가 같은 "정성호 법무장관 사의" 기사를
+# 냈는데, 경향신문 요약은 사직 배경·청와대 인사 절차까지 상세히 담았고 조선일보
+# 요약은 발언 요지만 짧게 담아 분량 차이가 컸다. 이 경우 Jaccard(교집합/합집합)는
+# 짧은 쪽에 없는 단어까지 분모에 다 들어가 13.2%(단어)/10.0%(문자)로 실제보다
+# 낮게 나와 임계값(25/18)을 통과 못 하고 새는 걸 확인. 반면 교집합/두 집합 중
+# 작은 쪽 크기로 나누는 오버랩 계수는 같은 데이터에서 38.5%(단어)/32.5%(문자)로
+# 뚜렷하게 잡힌다 — 요약 하나가 다른 하나를 사실상 포함하는 이런 비대칭 분량
+# 상황에 특화된 지표라 Jaccard 대신 이걸로 교체. 오탐 검증: 같은 날 같은 전당대회의
+# "당대표 선출" vs "최고위원 선출"(서로 다른 사건)은 오버랩 계수로도 6.7%(단어)/
+# 15.8%(문자)에 그쳐 아래 임계값에 안전하게 못 미친다(진짜 중복과 10%p 이상 여유).
+SUMMARY_WORD_OVERLAP_THRESHOLD = 30  # 이상이면 중복(단어 단위, 작은 쪽 집합 기준 포함비율)
+SUMMARY_CHAR_TRIGRAM_OVERLAP_THRESHOLD = 25  # 이상이면 중복(문자 단위) — 둘 중 하나만 넘어도 중복 처리
 TOPIC_STOPWORDS = {"속보", "단독", "종합", "오늘", "발표", "관련", "최근", "이후", "현재"}
 
 MAX_SEND_PER_RUN = 15        # 텔레그램 flood 방지용 1회 실행 발송 상한
@@ -274,12 +291,27 @@ def _keywords(title: str) -> set:
     return {w for w in toks if w not in TOPIC_STOPWORDS}
 
 
-def word_jaccard(a: str, b: str) -> float:
-    """단어 단위 Jaccard 유사도(0~100). 조사 변화에 강하지만 느슨해서 주제 포화 판정 전용."""
-    ka, kb = _keywords(a), _keywords(b)
-    if not ka or not kb:
+def _overlap_coeff(a: set, b: set) -> float:
+    """오버랩 계수(0~100) = 교집합 / 두 집합 중 작은 쪽 크기.
+
+    Jaccard(교집합/합집합)는 두 텍스트 분량이 비슷할 때만 잘 맞는다. 한쪽 요약이
+    다른 쪽을 사실상 포함하되 훨씬 상세한 경우(요약 모델·카테고리별 분량 차이로
+    흔함) Jaccard는 짧은 쪽에 없는 단어까지 분모(합집합)에 넣어 점수를 실제보다
+    낮춘다 — is_summary_duplicate 참고.
+    """
+    if not a or not b:
         return 0.0
-    return len(ka & kb) / len(ka | kb) * 100
+    return len(a & b) / min(len(a), len(b)) * 100
+
+
+def word_overlap(a: str, b: str) -> float:
+    """단어 단위 오버랩 계수(0~100). 조사 변화에 강함."""
+    return _overlap_coeff(_keywords(a), _keywords(b))
+
+
+def char_trigram_overlap(a: str, b: str) -> float:
+    """문자 3-gram 오버랩 계수(0~100)."""
+    return _overlap_coeff(_trigrams(a), _trigrams(b))
 
 
 def is_summary_duplicate(text: str, category: str, recent: list):
@@ -288,23 +320,29 @@ def is_summary_duplicate(text: str, category: str, recent: list):
     제목 기반 is_duplicate()보다 훨씬 정확하다 — 실측(2026-08-17): 같은 사건을
     다르게 쓴 제목은 자카드 13~15%로 갈렸지만, 같은 사건의 요약끼리는 48.5%,
     완전히 다른 사건의 요약끼리는 0%로 훨씬 뚜렷하게 갈린다.
+
+    Jaccard가 아니라 오버랩 계수를 쓴다 — 실사고(2026-08-18): 한쪽 요약(경향신문,
+    사직 배경·인사 절차까지 상세)이 다른 쪽 요약(조선일보, 발언 요지만 간략)을
+    사실상 포함하는데도 분량 차이 때문에 Jaccard로는 13.2%(단어)/10.0%(문자)에
+    그쳐 새어나갔다. 같은 데이터를 오버랩 계수로 재보면 38.5%/32.5%로 뚜렷이
+    잡힌다(_overlap_coeff 참고).
     """
-    best_wj, best_ct, best_text = 0.0, 0.0, ""
+    best_wo, best_co, best_text = 0.0, 0.0, ""
     for item in recent:
         if item.get("category") != category:
             continue
         other = item.get("summary") or item["title"]
-        wj = word_jaccard(text, other)
-        ct = title_similarity(text, other)
-        if wj > best_wj or ct > best_ct:
-            if wj >= best_wj:
-                best_wj = wj
-            if ct >= best_ct:
-                best_ct = ct
+        wo = word_overlap(text, other)
+        co = char_trigram_overlap(text, other)
+        if wo > best_wo or co > best_co:
+            if wo >= best_wo:
+                best_wo = wo
+            if co >= best_co:
+                best_co = co
             best_text = other
-    is_dup = (best_wj >= SUMMARY_WORD_JACCARD_THRESHOLD
-              or best_ct >= SUMMARY_CHAR_TRIGRAM_THRESHOLD)
-    return is_dup, round(best_wj, 1), round(best_ct, 1), best_text
+    is_dup = (best_wo >= SUMMARY_WORD_OVERLAP_THRESHOLD
+              or best_co >= SUMMARY_CHAR_TRIGRAM_OVERLAP_THRESHOLD)
+    return is_dup, round(best_wo, 1), round(best_co, 1), best_text
 
 
 # =========================
