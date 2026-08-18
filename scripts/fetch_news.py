@@ -55,6 +55,18 @@ RPD 소진 상태 영속화(2026-08-17): 상위 모델(3.7/3.6/3.5) RPD가 실�
       상위 모델부터 재시도하고 있었다(실측: 단독 13건 중 5건이 요약 없이 발송됨).
       state.json에 날짜와 함께 저장해두고 재사용한다(load_gemini_exhausted /
       save_gemini_exhausted) — 날짜가 바뀌면 초기화된다.
+개수 캡 없음(2026-08-18): 원래 속보/단독/종합을 합쳐 MAX_SUMMARIZE_PER_RUN=20 /
+      MAX_SEND_PER_RUN=15로 캡을 걸었었다. GOOGLE_NEWS_QUERIES가 속보→단독→종합
+      순으로 도는데, 밤 시간대 정치 속보가 몰리면(실측: 어느 시점 속보 태그 매칭
+      103건, 단독 84건) 속보만으로 전체 캡을 다 채워버려 단독이 통째로 밀려났다
+      — 워크플로가 "성공"으로 끝났는데도 채널엔 아무것도 안 올라온 사고가 발생
+      (구글 뉴스엔 "국정원", "한미협의" 단독이 떠 있었는데 캡에 밀려 후보 목록에
+      들지도 못함). 카테고리별로 캡을 나누는 방안도 검토했지만, 사용자가 "하루에
+      100개가 나올 수도 있고 2개가 나올 수도 있는데 개수로 캡을 걸면 많이 나오는
+      날은 나오다 만다"며 캡 자체를 없애기로 결정. 이제 중복만 걸러내고 나머지는
+      다 내보낸다 — 물량이 많은 날은 실행 시간이 늘어날 뿐 기사가 유실되지는
+      않는다(GitHub Actions 타임아웃에 걸려도 그때까지 처리분은 캐시에 저장되고,
+      못 보낸 나머지는 다음 실행에서 다시 후보로 떠서 이어 처리된다).
 
 실행: python scripts/fetch_news.py
 """
@@ -171,8 +183,16 @@ SUMMARY_WORD_OVERLAP_THRESHOLD = 30  # 이상이면 중복(단어 단위, 작은
 SUMMARY_CHAR_TRIGRAM_OVERLAP_THRESHOLD = 25  # 이상이면 중복(문자 단위) — 둘 중 하나만 넘어도 중복 처리
 TOPIC_STOPWORDS = {"속보", "단독", "종합", "오늘", "발표", "관련", "최근", "이후", "현재"}
 
-MAX_SEND_PER_RUN = 15        # 텔레그램 flood 방지용 1회 실행 발송 상한
-MAX_SUMMARIZE_PER_RUN = 20   # 크롤링·Gemini 요약을 시도할 후보 상한(비용 상한)
+# 실사고(2026-08-18): 원래 속보/단독/종합을 합쳐 MAX_SUMMARIZE_PER_RUN=20 /
+# MAX_SEND_PER_RUN=15로 캡을 걸었었다. GOOGLE_NEWS_QUERIES가 속보→단독→종합
+# 순으로 도는데, 밤 시간대 정치 속보가 몰리면(실측: 이 시각 속보 태그 매칭
+# 103건, 단독 84건) 속보만으로 전체 캡을 다 채워버려 단독이 통째로 밀려났다.
+# 21:18 이후 두 차례 실행이 다 "성공"으로 끝났는데도 채널엔 아무것도 안
+# 올라온 게 이 때문(구글 뉴스엔 "국정원", "한미협의" 단독이 떠 있었는데 캡에
+# 밀려 후보 목록에 들지도 못함). 카테고리별로 캡을 나누는 방안도 검토했지만
+# 사용자가 "개수 캡을 걸지 마"라고 확정 — 캡 자체를 없앤다. 텔레그램은 같은
+# 채팅방에 초당 1건 정도로만 안전하게 보낼 수 있어 SEND_INTERVAL_SEC 간격
+# 발송은 유지한다 — 발송 건수가 많아지면 실행 시간이 늘어날 뿐, 유실되지 않는다.
 SEND_INTERVAL_SEC = 1.5      # 발송 간 대기
 
 # 모든 카테고리에서 요약을 만든다(2026-08-17) — 중복판정에 요약이 필요해졌고,
@@ -610,6 +630,10 @@ def run():
     # 후보끼리는 서로 비교가 안 되고 "과거 발송 이력"하고만 비교됐다. 그 결과 중앙일보·
     # 조선비즈가 완전히 동일한 제목("종합특검, '관저 이전 의혹' 김건희·윤한홍 기소")으로
     # 올라온 것도 안 걸러짐 — 같은 실행 안에서 뽑힌 후보끼리도 반드시 서로 비교해야 한다.
+    # 개수 캡을 두지 않는다(2026-08-18 사용자 결정) — 뉴스 물량은 날마다 들쭉날쭉해서
+    # 하루 100건 나오는 날도 2건만 나오는 날도 있는데, 개수로 캡을 걸면 많이 나오는
+    # 날 진짜 새 기사가 캡에 밀려 사라진다(바로 위 실사고). 중복만 걸러내고 나머지는
+    # 다 내보낸다 — 실행 시간이 늘어날 뿐 유실은 없다.
     stage1 = []
     review_log = []
     for category, url in GOOGLE_NEWS_QUERIES.items():
@@ -633,41 +657,40 @@ def run():
             recent_for_dedup.append({"title": c["title"], "category": category,
                                       "sent_at": now_kst().isoformat()})
 
-    stage1 = stage1[:MAX_SUMMARIZE_PER_RUN]
-    print(f"본문 확인 대상 {len(stage1)}건 (상한 {MAX_SUMMARIZE_PER_RUN}건)")
+    print(f"본문 확인 대상 {len(stage1)}건")
 
     # ── 2단계: 본문을 크롤링·요약해 진짜 중복인지 정확하게 판정한다 ──
     to_send = []
     processed = []  # 발송은 안 됐지만 재수집 방지를 위해 처리된 것으로 기록할 항목
 
     for c in stage1:
+        category = c["category"]
         c["real_link"] = resolve_real_url(c["link"])
 
         domain = urlparse(c["real_link"]).netloc.replace("www.", "")
         if domain in EXCLUDE_LINK_DOMAINS:
             print(f"  🚫 제외 도메인({domain}): {c['title'][:40]}")
-            processed.append({"guid": c["guid"], "title": c["title"], "category": c["category"],
+            processed.append({"guid": c["guid"], "title": c["title"], "category": category,
                                "sent_at": now_kst().isoformat()})
             continue
 
         raw_text = crawl_article_text(c["real_link"])
-        c["summary"] = summarize_with_gemini(c["title"], raw_text, c["category"])
+        c["summary"] = summarize_with_gemini(c["title"], raw_text, category)
         compare_text = c["summary"] or c["title"]  # 요약 실패 시 제목으로라도 비교
 
-        is_dup2, wj, ct, matched2 = is_summary_duplicate(compare_text, c["category"], recent_for_dedup)
+        is_dup2, wj, ct, matched2 = is_summary_duplicate(compare_text, category, recent_for_dedup)
         if is_dup2:
             print(f"  ⏭️  본문 중복 생략(단어 {wj}%/문자 {ct}%): {c['title'][:40]} ≈ {matched2[:40]}")
-            processed.append({"guid": c["guid"], "title": c["title"], "category": c["category"],
+            processed.append({"guid": c["guid"], "title": c["title"], "category": category,
                                "sent_at": now_kst().isoformat()})
             continue
 
         to_send.append(c)
         # 이번 실행 안에서 뽑은 기사끼리도 서로 비교 대상에 넣는다(요약 캐시 포함).
-        recent_for_dedup.append({"title": c["title"], "summary": c["summary"], "category": c["category"],
+        recent_for_dedup.append({"title": c["title"], "summary": c["summary"], "category": category,
                                   "sent_at": now_kst().isoformat()})
 
-    to_send = to_send[:MAX_SEND_PER_RUN]
-    print(f"발송 대상 {len(to_send)}건 (상한 {MAX_SEND_PER_RUN}건)")
+    print(f"발송 대상 {len(to_send)}건")
 
     state["sent"].extend(processed)
 
