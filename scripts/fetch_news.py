@@ -30,6 +30,13 @@ scripts/fetch_news.py
         분모(합집합)에 들어가는 Jaccard는 진짜 중복인데도 13.2%/10.0%로 낮게 나와
         임계값을 통과시켰다. 오버랩 계수는 같은 데이터에서 38.5%/32.5%로 뚜렷이
         잡힌다(word_overlap/char_trigram_overlap 참고).
+        추가로 숫자 충돌 가드가 있다(실사고 2026-08-20) — "코스피 4%대 급등…매수
+        사이드카 발동"과 "코스피 6%대 급등…매수 사이드카 발동"이 문구 템플릿이
+        같다는 이유로 72.7% 유사도로 중복 처리됐다. 시황/지수 속보는 문구는 고정
+        템플릿이고 핵심 수치(%, 지수, 환율 등)만 실시간으로 바뀌는데 그 수치가
+        진짜 새 정보다. 두 텍스트에 다 숫자가 있고 공통 숫자가 하나도 없으면
+        문구가 비슷해도 중복 처리하지 않는다(_numbers_conflict, is_duplicate·
+        is_summary_duplicate 둘 다 적용).
       (Supabase/Gemini 통합 재작성 단계는 여기선 안 씀 — 우리는 자체 기사를 쓰는 게 아니라
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
 링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
@@ -342,6 +349,29 @@ def title_similarity(a: str, b: str) -> float:
     return (inter / union) * 100 if union else 0.0
 
 
+# 실사고(2026-08-20): "코스피 4%대 급등…매수 사이드카 발동"과 "코스피 6%대
+# 급등…매수 사이드카 발동"이 문구 템플릿이 같다는 이유로 72.7% 제목 유사도로
+# 중복 처리됐다. 사용자 지적: "코스피 같은 증시 기사는 매일이 다른 기사인데
+# 이걸 중복처리 해버렸다" — 시황/지수 속보는 문구는 거의 고정 템플릿이고 핵심
+# 수치(%, 지수, 환율 등)만 실시간으로 바뀌는데, 그 수치야말로 진짜 "새 정보"라
+# 문구 유사도만으로 중복 판정하면 안 된다. 두 텍스트에 다 숫자가 있고 그 숫자
+# 집합이 완전히 겹치지 않으면(공통 숫자가 하나도 없으면) 문구가 비슷해도 다른
+# 속보로 본다 — is_duplicate(제목)·is_summary_duplicate(요약) 둘 다에 적용.
+_NUMBER_RE = re.compile(r"\d+(?:,\d{3})*(?:\.\d+)?%?")
+
+
+def _extract_key_numbers(text: str) -> set:
+    """퍼센트·지수·가격 등 핵심 수치를 뽑는다(시황 기사 실시간 갱신 구분용)."""
+    return set(_NUMBER_RE.findall(text or ""))
+
+
+def _numbers_conflict(a: str, b: str) -> bool:
+    """두 텍스트 다 숫자가 있는데 겹치는 숫자가 하나도 없으면 True — 같은 문구
+    템플릿이라도 실제로는 다른 시점/수치를 보도하는 별개 속보라는 뜻."""
+    na, nb = _extract_key_numbers(a), _extract_key_numbers(b)
+    return bool(na) and bool(nb) and not (na & nb)
+
+
 def is_duplicate(title: str, category: str, recent: list):
     """최근 발송분과 제목 유사도 비교. (is_dup, score, matched_title) 반환."""
     best_score, best_title = 0.0, ""
@@ -351,7 +381,10 @@ def is_duplicate(title: str, category: str, recent: list):
         score = title_similarity(title, item["title"])
         if score > best_score:
             best_score, best_title = score, item["title"]
-    return best_score >= DUP_SKIP_THRESHOLD, round(best_score, 1), best_title
+    is_dup = best_score >= DUP_SKIP_THRESHOLD
+    if is_dup and _numbers_conflict(title, best_title):
+        is_dup = False
+    return is_dup, round(best_score, 1), best_title
 
 
 def _keywords(title: str) -> set:
@@ -412,6 +445,11 @@ def is_summary_duplicate(text: str, category: str, recent: list):
             best_text = other
     is_dup = (best_wo >= SUMMARY_WORD_OVERLAP_THRESHOLD
               or best_co >= SUMMARY_CHAR_TRIGRAM_OVERLAP_THRESHOLD)
+    # 실사고(2026-08-20): 시황 속보(코스피/환율 등)는 문구 템플릿이 고정이라
+    # 요약끼리도 겹쳐 보이지만 핵심 수치가 다르면 다른 시점의 다른 속보다 —
+    # is_duplicate와 동일한 숫자 충돌 가드를 여기도 적용한다.
+    if is_dup and _numbers_conflict(text, best_text):
+        is_dup = False
     return is_dup, round(best_wo, 1), round(best_co, 1), best_text
 
 
