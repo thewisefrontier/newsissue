@@ -72,6 +72,14 @@ RPD 소진 상태 영속화(2026-08-17): 상위 모델(3.7/3.6/3.5) RPD가 실�
       다 내보낸다 — 물량이 많은 날은 실행 시간이 늘어날 뿐 기사가 유실되지는
       않는다(GitHub Actions 타임아웃에 걸려도 그때까지 처리분은 캐시에 저장되고,
       못 보낸 나머지는 다음 실행에서 다시 후보로 떠서 이어 처리된다).
+결정 이력 로깅(2026-08-20): 삼성전자 100조 주주환원 기사가 오탐으로 중복
+      스킵됐는데, GitHub Actions 로그는 c['title']만 찍고(실제 비교된 요약이
+      아님) 90일 뒤 사라져서 원인 재구성이 불가능했다. Cloudflare D1(스키마는
+      저장소 루트 schema.sql)에 스테이지-2 판정(발송/중복스킵/도메인제외)을
+      전부 남긴다(log_decision) — compare_text/matched_text는 절단 없이 전체
+      저장해서 나중에 SQL로 바로 조회 가능. 수파베이스는 이미 계정에 프로젝트
+      2개가 돌고 있어 D1로 새로 팠다(무료 티어 프로젝트 개수 제한 없음).
+      best-effort — D1 기록이 실패해도 발송 흐름은 막지 않는다.
 
 실행: python scripts/fetch_news.py
 """
@@ -207,6 +215,40 @@ SEND_INTERVAL_SEC = 1.5      # 발송 간 대기
 # v.daum.net은 반복적으로 문제가 됨(위젯 텍스트 오발송 실사고 + 사용자가 링크
 # 자체를 원치 않음, 2026-08-17). 원문이 이 도메인으로 귀결되면 아예 발송하지 않는다.
 EXCLUDE_LINK_DOMAINS = {"v.daum.net", "news.v.daum.net"}
+
+# 실사고(2026-08-20): 삼성전자 100조 주주환원 기사가 오탐으로 중복 스킵됐는데,
+# GitHub Actions 로그는 c['title']만 찍혀서 실제 비교된 요약과 매칭 대상을
+# 재구성할 수 없었다(90일 뒤엔 로그 자체도 사라짐). Cloudflare D1에 스테이지-2
+# 판정을 전부 남겨서 나중에 SQL로 바로 조회할 수 있게 한다 — 스키마는
+# schema.sql 참고. 실패해도(네트워크 문제 등) 발송 자체는 막지 않는다
+# (best-effort, save_state와 무관하게 독립적으로 동작).
+CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "")
+CF_D1_DATABASE_ID = os.getenv("CF_D1_DATABASE_ID", "")
+CF_API_TOKEN = os.getenv("CF_API_TOKEN", "")
+
+
+def log_decision(guid: str, category: str, title: str, link: str, decision: str,
+                  compare_text: str = "", matched_text: str = "",
+                  word_score: float = None, char_score: float = None, summary: str = ""):
+    """중복판정/발송 결과를 D1에 기록한다. best-effort — 실패해도 발송 흐름을 막지 않는다."""
+    if not (CF_ACCOUNT_ID and CF_D1_DATABASE_ID and CF_API_TOKEN):
+        return
+    try:
+        requests.post(
+            f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/d1/database/{CF_D1_DATABASE_ID}/query",
+            headers={"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"},
+            json={
+                "sql": ("INSERT INTO decisions "
+                        "(run_at, guid, category, title, link, decision, compare_text, "
+                        "matched_text, word_score, char_score, summary) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+                "params": [now_kst().isoformat(), guid, category, title, link, decision,
+                           compare_text, matched_text, word_score, char_score, summary],
+            },
+            timeout=8,
+        )
+    except Exception as e:
+        print(f"  ⚠️ D1 기록 실패(무시하고 계속): {e}")
 
 
 # =========================
@@ -689,6 +731,7 @@ def run():
             print(f"  🚫 제외 도메인({domain}): {c['title'][:40]}")
             processed.append({"guid": c["guid"], "title": c["title"], "category": category,
                                "sent_at": now_kst().isoformat()})
+            log_decision(c["guid"], category, c["title"], c["real_link"], "excluded_domain")
             continue
 
         raw_text = crawl_article_text(c["real_link"])
@@ -697,9 +740,21 @@ def run():
 
         is_dup2, wj, ct, matched2 = is_summary_duplicate(compare_text, category, recent_for_dedup)
         if is_dup2:
-            print(f"  ⏭️  본문 중복 생략(단어 {wj}%/문자 {ct}%): {c['title'][:40]} ≈ {matched2[:40]}")
+            # 실사고(2026-08-20): 삼성전자 100조 주주환원 기사가 중복 판정을 받았는데,
+            # 로그엔 항상 c['title']만 찍혀서 실제 비교에 쓰인 텍스트(요약 성공 시엔
+            # summary, 실패 시엔 title)를 알 수 없어 원인 재구성이 불가능했다.
+            # 실제로 비교된 compare_text와 매칭 상대(matched2)를 그대로 찍어서
+            # 다음엔 바로 원인을 알 수 있게 한다. 요약 성공/실패 여부도 표시.
+            # D1에도 전체(비절단) 텍스트를 남겨서 로그 90일 만료·40/80자 절단
+            # 문제 없이 언제든 SQL로 조회할 수 있게 한다.
+            label = "요약" if c["summary"] else "제목(요약실패)"
+            print(f"  ⏭️  본문 중복 생략(단어 {wj}%/문자 {ct}%) [{label}]: "
+                  f"{compare_text[:80]} ≈ {matched2[:80]}")
             processed.append({"guid": c["guid"], "title": c["title"], "category": category,
                                "sent_at": now_kst().isoformat()})
+            log_decision(c["guid"], category, c["title"], c["real_link"], "dup_summary",
+                         compare_text=compare_text, matched_text=matched2,
+                         word_score=wj, char_score=ct)
             continue
 
         to_send.append(c)
@@ -721,6 +776,9 @@ def run():
                 "category": item["category"], "sent_at": now_kst().isoformat(),
             })
             print(f"  ✅ [{item['category']}] {item['title'][:50]}")
+            log_decision(item["guid"], item["category"], item["title"],
+                         item.get("real_link") or item["link"], "sent",
+                         compare_text=item.get("summary", ""), summary=item.get("summary", ""))
         else:
             print(f"  ❌ 발송 실패: {res}")
         time.sleep(SEND_INTERVAL_SEC)
