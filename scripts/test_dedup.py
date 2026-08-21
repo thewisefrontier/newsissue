@@ -14,6 +14,7 @@ requirements.txt에 없다.)
 """
 
 import sys
+import time
 
 from fetch_news import (
     is_duplicate,
@@ -21,6 +22,8 @@ from fetch_news import (
     _looks_like_refusal,
     word_overlap,
     char_trigram_overlap,
+    _article_age_hours,
+    STALE_BREAKING_NEWS_HOURS,
 )
 
 
@@ -116,6 +119,28 @@ def test_market_term_alias_and_pct_only_conflict_guard():
     return ok
 
 
+def test_stale_breaking_news_age_calc():
+    """실사고(2026-08-21): 연합뉴스TV "[속보] 코스피 1%대 하락…6,750선 출발"
+    (발행 09:06 KST, 장 시작 시점 기사)이 17:01 KST에야 "[속보]"로 뒤늦게
+    발송됐다 — 이미 장이 마감된 뒤였다. 구글 뉴스 검색 결과가 발행순이 아니라
+    관련도순이라 오래된 기사가 늦게 우리 폴링에 걸릴 수 있어서다.
+    _article_age_hours가 오래된/최신 기사, 발행시각 없는 기사를 올바르게
+    구분하는지 확인한다(fetch_candidates가 이 값으로 STALE_BREAKING_NEWS_HOURS
+    초과 [속보]를 후보에서 제외한다)."""
+    old_entry = {"published_parsed": time.gmtime(time.time() - 8 * 3600)}
+    fresh_entry = {"published_parsed": time.gmtime(time.time() - 0.2 * 3600)}
+    no_date_entry = {}
+    old_age = _article_age_hours(old_entry)
+    fresh_age = _article_age_hours(fresh_entry)
+    none_age = _article_age_hours(no_date_entry)
+    return (
+        check(f"8시간 전 기사 → STALE_BREAKING_NEWS_HOURS({STALE_BREAKING_NEWS_HOURS}시간) 초과",
+              old_age > STALE_BREAKING_NEWS_HOURS, f"age={old_age}")
+        and check("12분 전 기사 → 임계값 이내", fresh_age <= STALE_BREAKING_NEWS_HOURS, f"age={fresh_age}")
+        and check("발행시각 없음 → None(필터링 안 함, 판단 못 할 땐 보내는 쪽)", none_age is None)
+    )
+
+
 def test_refusal_marks():
     """실사고(2026-08-18): "본문 내용이 없어 요약할 수 없다"가 그대로 발송됨.
     실사고(2026-08-19): 뉴스핌 속보 자리채움 문구("자세한 뉴스는 곧 전해질
@@ -139,6 +164,7 @@ def main():
         test_summary_overlap_false_positive_guard(),
         test_numeric_conflict_guard(),
         test_market_term_alias_and_pct_only_conflict_guard(),
+        test_stale_breaking_news_age_calc(),
         test_refusal_marks(),
     ]
     print()
