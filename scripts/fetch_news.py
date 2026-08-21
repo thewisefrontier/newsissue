@@ -667,13 +667,19 @@ def send_telegram(item: dict) -> dict:
     # 속보는 빠른 팩트 전달이 목적이라 링크 미리보기(썸네일 사진)를 안 보여준다.
     # 단독은 심층 취재물이라 미리보기가 유용해 그대로 둔다(2026-08-17 사용자 결정).
     show_preview = item["category"] not in ("속보",)
+    # 미리보기를 보여줄 땐 큰 사진 대신 작은 썸네일로(2026-08-21 사용자 요청) —
+    # 구식 disable_web_page_preview 대신 신식 link_preview_options를 쓴다.
+    # Bot API는 object 파라미터를 JSON 문자열로 받는다.
+    link_preview_options = (
+        {"prefer_small_media": True} if show_preview else {"is_disabled": True}
+    )
     res = requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
         data={
             "chat_id": CHAT_ID,
             "text": msg,
             "parse_mode": "HTML",
-            "disable_web_page_preview": not show_preview,
+            "link_preview_options": json.dumps(link_preview_options),
         },
         timeout=15,
     )
