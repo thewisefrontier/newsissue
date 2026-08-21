@@ -26,6 +26,10 @@ scripts/fetch_news.py
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
 링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
       실제 언론사 URL을 먼저 알아내 그쪽을 보여준다.
+신선도(2026-08-21): 구글 뉴스 검색 결과는 발행 시각 순이 아니라 관련도 순이라,
+      오래전에 발행된 기사가 뒤늦게 우리 폴링 결과에 걸릴 수 있다. "속보"는 "지금
+      막 일어난 일"이라는 프레이밍이 핵심이라 이미 오래된 기사를 속보로 보내면
+      사실과 다른 인상을 준다 — fetch_candidates 옆 주석 참고.
 본문 요약: 정규식으로 "첫 문단"을 고르는 방식은 매체마다 다른 위젯 텍스트(읽어주기
       서비스, 댓글 안내 등)를 본문으로 오인해 반복적으로 실패했다(다음뉴스·연합뉴스TV·
       KBS 3건 실사고). 규칙 기반 대신 크롤링한 원문(노이즈 섞여도 무방)을 통째로 Gemini에
@@ -47,6 +51,7 @@ import sys
 import json
 import html
 import time
+import calendar
 import hashlib
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -441,6 +446,31 @@ def is_summary_duplicate(text: str, category: str, recent: list):
 # FETCH
 # =========================
 
+# 실사고(2026-08-21): 연합뉴스TV "[속보] 코스피 1%대 하락…6,750선 출발"(장 시작
+# 시점 기사, 실제 발행 00:06 UTC=09:06 KST)이 17:01 KST에야 채널에 발송됐다 —
+# 발행 8시간 뒤에 "방금 속보"인 것처럼 나간 것(장이 이미 마감된 뒤였다). 구글
+# 뉴스 검색 결과는 발행 시각 순이 아니라 관련도 순이라 오래된 기사가 뒤늦게
+# 우리 폴링 결과에 들어올 수 있다(전에도 확인한 커버리지 특성). "속보"는 "지금
+# 막 일어난 일"이라는 프레이밍 자체가 핵심이라, 이미 오래된 기사를 속보로 보내면
+# 사실과 다른 인상을 준다. 발행 후 STALE_BREAKING_NEWS_HOURS를 넘은 [속보] 후보는
+# 애초에 후보 목록에서 제외한다 — 단독/종합은 "방금 일어난 일"이라는 프레이밍이
+# 없어 그대로 둔다(늦게라도 다루는 게 의미 있는 카테고리).
+STALE_BREAKING_NEWS_HOURS = 2
+
+
+def _article_age_hours(entry) -> float | None:
+    """RSS published_parsed 기준 기사 나이(시간). 파싱 불가하면 None(필터링 안 함 — 판단 못 할
+    땐 걸러내지 않는 쪽이 안전하다, 놓치는 것보다 낫다는 이 프로젝트의 원칙과 일관됨)."""
+    published_parsed = entry.get("published_parsed")
+    if not published_parsed:
+        return None
+    try:
+        published_epoch = calendar.timegm(published_parsed)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return (time.time() - published_epoch) / 3600
+
+
 def fetch_candidates(category: str, url: str) -> list:
     feed = feedparser.parse(url, request_headers={"User-Agent": "Mozilla/5.0"})
     out = []
@@ -448,6 +478,11 @@ def fetch_candidates(category: str, url: str) -> list:
         raw_title = entry.get("title", "")
         if not TAG_RE[category].search(raw_title):
             continue  # 태그 없는 일반 단어 매칭("단독선두" 등) 배제
+        if category == "속보":
+            age = _article_age_hours(entry)
+            if age is not None and age > STALE_BREAKING_NEWS_HOURS:
+                print(f"  🕰️ 오래된 속보 제외({age:.1f}시간 전 발행): {raw_title[:40]}")
+                continue
         out.append({
             "guid": guid_of(entry),
             "title": clean_title(raw_title, category),
