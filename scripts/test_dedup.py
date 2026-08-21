@@ -71,6 +71,51 @@ def test_summary_overlap_false_positive_guard():
     return check("전당대회 내 다른 사건 → 중복 아님", not is_dup, f"word={wo} char={co}")
 
 
+def test_numeric_conflict_guard():
+    """실사고(2026-08-20): "코스피 4%대 급등…매수 사이드카 발동"과 "코스피 6%대
+    급등…매수 사이드카 발동"이 문구 템플릿이 같다는 이유로 72.7% 제목 유사도로
+    중복 처리됐다. 시황 속보는 문구는 고정 템플릿이고 핵심 수치만 실시간으로
+    바뀌는데, 그 수치가 진짜 새 정보라 숫자가 다르면 문구가 비슷해도 중복이면
+    안 된다. 단, 숫자까지 완전히 같으면(진짜 동일 기사 재수집 등) 여전히
+    중복으로 잡혀야 한다."""
+    recent = [{"title": "[속보] 코스피 4%대 급등…매수 사이드카 발동", "category": "속보"}]
+    dup_diff_num, score_diff, _ = is_duplicate(
+        "[속보] 코스피 6%대 급등…매수 사이드카 발동", "속보", recent)
+    dup_same_num, score_same, _ = is_duplicate(
+        "[속보] 코스피 4%대 급등…매수 사이드카 발동", "속보", recent)
+    return (
+        check("숫자만 다른 시황 제목 → 중복 아님", not dup_diff_num, f"score={score_diff}")
+        and check("숫자까지 같은 완전 동일 제목 → 중복 판정", dup_same_num, f"score={score_same}")
+    )
+
+
+def test_market_term_alias_and_pct_only_conflict_guard():
+    """실사고(2026-08-21): 코스닥 매도 사이드카 발동(같은 날, 같은 사건)이
+    머니투데이("지수 800.86")·뉴스웍스("4% 급락")로 다르게 보도됐는데, (1) 한쪽은
+    공식용어("매도호가 일시효력정지"), 다른 쪽은 통용어("매도 사이드카")를 써서
+    단어/문자 겹침이 임계값 미만이었고 (2) 지수값 vs 등락률처럼 아예 다른 종류의
+    숫자라 숫자충돌가드가 "숫자 안 겹침 → 다른 기사"로 오판해 둘 다 발송됐다.
+    용어 정규화(_normalize_market_terms)로 겹침을 끌어올리고, 숫자충돌가드를
+    퍼센트로만 한정해 지수값 vs 등락률 같은 이종 숫자 비교로 인한 오판을 없앤다.
+    단, 코스피 4%→6%처럼 %끼리 실제로 다른 시황 속보는 여전히 중복이 아니어야
+    한다(회귀 방지 — test_numeric_conflict_guard와 겹치지만 이 케이스에서
+    같이 깨지지 않는지 다시 확인)."""
+    formal = ("한국거래소가 코스닥 시장에 올해 32번째 프로그램 매도호가 일시효력정지를 "
+              "발동했다. 지수가 하락하면서 장중 800.86으로 산출됐다.")
+    common = ("21일 한국거래소는 코스닥시장에 매도 사이드카를 발동했다. 이날 코스닥 "
+              "지수는 4% 넘게 급락하며 800선이 위태로운 상황이다.")
+    recent = [{"title": "x", "summary": formal, "category": "속보"}]
+    is_dup, wo, co, _ = is_summary_duplicate(common, "속보", recent)
+    ok = check("같은 사이드카 사건, 용어만 다름 → 중복 판정", is_dup, f"word={wo} char={co}")
+
+    kospi_recent = [{"title": "[속보] 코스피 4%대 급등…매수 사이드카 발동", "category": "속보"}]
+    dup_diff, score_diff, _ = is_duplicate(
+        "[속보] 코스피 6%대 급등…매수 사이드카 발동", "속보", kospi_recent)
+    ok = check("퍼센트 전용 가드로 바꿔도 진짜 다른 % 시황은 여전히 중복 아님",
+               not dup_diff, f"score={score_diff}") and ok
+    return ok
+
+
 def test_refusal_marks():
     """실사고(2026-08-18): "본문 내용이 없어 요약할 수 없다"가 그대로 발송됨.
     실사고(2026-08-19): 뉴스핌 속보 자리채움 문구("자세한 뉴스는 곧 전해질
@@ -92,6 +137,8 @@ def main():
         test_stage1_title_same_batch(),
         test_summary_overlap_asymmetric_length(),
         test_summary_overlap_false_positive_guard(),
+        test_numeric_conflict_guard(),
+        test_market_term_alias_and_pct_only_conflict_guard(),
         test_refusal_marks(),
     ]
     print()
