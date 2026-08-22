@@ -20,7 +20,8 @@ scripts/fetch_news.py
         당선"처럼 완전히 다른 사건은 요약 유사도가 0%로 나와, 제목 대신 요약 비교로
         바꾸면서 개수 캡(주제당 N건) 없이도 진짜 중복만 정확히 거를 수 있게 됐다
         (캡 방식은 폐기 — 중요한 후속 속보가 개수 제한에 걸려 묻히는 부작용이 있었다).
-        시황/지수 속보(코스피·코스닥 등락, 사이드카 등)는 문구가 고정 템플릿이라
+        시황/지수 속보(코스피·코스닥 등락, 사이드카 등)는 문구가 고정 템플릿이라,
+        원보도/정정보도(발견 ↔ 발견 사실 아님)는 정반대 내용인데 핵심 단어가 겹쳐
         추가 보정이 필요했다 — is_duplicate/is_summary_duplicate 옆 주석 참고.
       비교 대상 시간창(DEDUP_WINDOW_HOURS_BY_CATEGORY)도 카테고리별로 다르다 —
         속보는 시황처럼 몇 분 단위로 실제 값이 바뀌는 경우가 있어 짧게(2시간),
@@ -389,6 +390,31 @@ def _numbers_conflict(a: str, b: str) -> bool:
     return bool(na) and bool(nb) and not (na & nb)
 
 
+# 실사고(2026-08-22): "[속보]제주 한림항 인근서 장미란씨 추정 시신 발견…신분증
+# 나와"에 이어 "[속보]제주경찰 '실종자 추정 시신발견 사실 아니다' 정보 혼선"이라는
+# 정정 속보가 나왔는데, 두 기사는 "제주"·"실종자"·"시신"·"발견" 같은 핵심 단어를
+# 공유하는 같은 사건 기사라 오버랩 계수가 우연히 낮게 나오지 않았다면 정정 기사가
+# 원 기사의 "중복"으로 오판돼 걸러질 뻔했다(실측으로는 이번엔 형태소 차이로 우연히
+# 안 걸렸을 뿐, 안정적인 방지책이 아니었다). 원보도와 정정보도는 내용이 정반대라
+# 오버랩 점수와 무관하게 항상 다른 기사로 취급해야 한다 — 숫자충돌가드와 같은
+# 패턴으로, 한쪽에만 정정/반박 표현이 있으면(둘 다 있거나 둘 다 없으면 아님)
+# 중복 아님으로 강제한다.
+_CORRECTION_MARKS = (
+    "사실이 아니", "사실 아니", "오보", "허위", "사실무근", "정정합니다", "정정 보도",
+    "확인 결과 아니", "정보 혼선", "잘못 전해",
+)
+
+
+def _is_correction(text: str) -> bool:
+    return any(mark in (text or "") for mark in _CORRECTION_MARKS)
+
+
+def _correction_mismatch(a: str, b: str) -> bool:
+    """한쪽만 정정/반박 표현을 담고 있으면 True — 같은 사건이라도 원보도와
+    정정보도는 정반대 내용이라 중복으로 묶으면 안 된다."""
+    return _is_correction(a) != _is_correction(b)
+
+
 def is_duplicate(title: str, category: str, recent: list):
     """최근 발송분과 제목 유사도 비교. (is_dup, score, matched_title) 반환."""
     best_score, best_title = 0.0, ""
@@ -399,7 +425,7 @@ def is_duplicate(title: str, category: str, recent: list):
         if score > best_score:
             best_score, best_title = score, item["title"]
     is_dup = best_score >= DUP_SKIP_THRESHOLD
-    if is_dup and _numbers_conflict(title, best_title):
+    if is_dup and (_numbers_conflict(title, best_title) or _correction_mismatch(title, best_title)):
         is_dup = False
     return is_dup, round(best_score, 1), best_title
 
@@ -468,7 +494,10 @@ def is_summary_duplicate(text: str, category: str, recent: list):
     # 실사고(2026-08-20): 시황 속보(코스피/환율 등)는 문구 템플릿이 고정이라
     # 요약끼리도 겹쳐 보이지만 핵심 수치가 다르면 다른 시점의 다른 속보다 —
     # is_duplicate와 동일한 숫자 충돌 가드를 여기도 적용한다.
-    if is_dup and _numbers_conflict(text, best_text):
+    # 실사고(2026-08-22): 원보도와 정정보도(예: "시신 발견" ↔ "발견 사실 아니다")는
+    # 핵심 단어가 겹쳐 오버랩 점수가 높게 나올 수 있지만 내용은 정반대다 —
+    # is_duplicate와 동일한 정정 표현 가드를 여기도 적용한다.
+    if is_dup and (_numbers_conflict(text, best_text) or _correction_mismatch(text, best_text)):
         is_dup = False
     return is_dup, round(best_wo, 1), round(best_co, 1), best_text
 
