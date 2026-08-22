@@ -26,6 +26,13 @@ scripts/fetch_news.py
         속보는 시황처럼 몇 분 단위로 실제 값이 바뀌는 경우가 있어 짧게(2시간),
         단독/종합은 몇 시간~하루 간격으로 재등장하는 재탕을 잡아야 해서 길게
         (12시간) 둔다 — prune_state 옆 주석 참고.
+      실사고(2026-08-22, 심각): 1단계 루프가 통과한 모든 후보의 "제목만" 항목을
+        recent_for_dedup에 즉시 넣는데, 이 리스트를 2단계 is_summary_duplicate에
+        그대로 넘기면서 후보가 자기 자신의 1단계 항목과 비교되는 사고가 있었다.
+        제목과 요약은 같은 사건을 다루므로 핵심 단어가 늘 겹쳐 오버랩 계수가
+        손쉽게 임계값을 넘어 "중복"으로 오판됨 — 실측: 연속 실행 로그 9회 중
+        7회가 스테이지-2 후보가 있었는데도 발송 0건. guid로 자기 자신 항목만
+        제외하고 비교하도록 고쳤다(stage-2 루프의 recent_excl_self 참고).
       (Supabase/Gemini 통합 재작성 단계는 여기선 안 씀 — 우리는 자체 기사를 쓰는 게 아니라
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
 링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
@@ -439,6 +446,9 @@ def is_summary_duplicate(text: str, category: str, recent: list):
     사실상 포함하는데도 분량 차이 때문에 Jaccard로는 13.2%(단어)/10.0%(문자)에
     그쳐 새어나갔다. 같은 데이터를 오버랩 계수로 재보면 38.5%/32.5%로 뚜렷이
     잡힌다(_overlap_coeff 참고).
+
+    호출부(run())가 recent에서 이 후보 자신의 guid를 반드시 제외하고 넘겨야 한다 —
+    2026-08-22 실사고 참고(자기 자신과 비교하면 늘 중복으로 오판된다).
     """
     best_wo, best_co, best_text = 0.0, 0.0, ""
     for item in recent:
@@ -801,7 +811,9 @@ def run():
 
             stage1.append(c)
             # 이번 배치 안의 다른 후보와도 비교되도록 즉시 추가한다(위 실사고의 원인).
-            recent_for_dedup.append({"title": c["title"], "category": category,
+            # guid를 반드시 같이 저장한다 — 안 그러면 스테이지2에서 자기 자신과
+            # 비교하는 사고가 난다(바로 아래 stage-2 루프 주석 참고).
+            recent_for_dedup.append({"guid": c["guid"], "title": c["title"], "category": category,
                                       "sent_at": now_kst().isoformat()})
 
     print(f"본문 확인 대상 {len(stage1)}건")
@@ -826,7 +838,14 @@ def run():
         c["summary"] = summarize_with_gemini(c["title"], raw_text, category)
         compare_text = c["summary"] or c["title"]  # 요약 실패 시 제목으로라도 비교
 
-        is_dup2, wj, ct, matched2 = is_summary_duplicate(compare_text, category, recent_for_dedup)
+        # 실사고(2026-08-22): 1단계 루프가 통과한 모든 후보의 "제목만" 항목을 이미
+        # recent_for_dedup에 넣어둔 채로 2단계에 들어오는데, 그중엔 지금 막 비교하려는
+        # 이 후보 자기 자신의 항목도 포함돼 있다. 제목과 요약은 같은 사건이라 늘 핵심
+        # 단어가 겹치므로(예: "장미란", "한림항", "시신"), 자기 자신과 비교하면 오버랩
+        # 계수가 손쉽게 임계값을 넘어 "중복"으로 오판된다 — 실측: 이 사고로 9번 연속
+        # 실행 중 7번이 후보가 있었는데도 발송 0건. guid로 자기 자신 항목만 빼고 비교한다.
+        recent_excl_self = [r for r in recent_for_dedup if r.get("guid") != c["guid"]]
+        is_dup2, wj, ct, matched2 = is_summary_duplicate(compare_text, category, recent_excl_self)
         if is_dup2:
             # 실사고(2026-08-20): 삼성전자 100조 주주환원 기사가 중복 판정을 받았는데,
             # 로그엔 항상 c['title']만 찍혀서 실제 비교에 쓰인 텍스트(요약 성공 시엔
@@ -847,8 +866,8 @@ def run():
 
         to_send.append(c)
         # 이번 실행 안에서 뽑은 기사끼리도 서로 비교 대상에 넣는다(요약 캐시 포함).
-        recent_for_dedup.append({"title": c["title"], "summary": c["summary"], "category": category,
-                                  "sent_at": now_kst().isoformat()})
+        recent_for_dedup.append({"guid": c["guid"], "title": c["title"], "summary": c["summary"],
+                                  "category": category, "sent_at": now_kst().isoformat()})
 
     print(f"발송 대상 {len(to_send)}건")
 
