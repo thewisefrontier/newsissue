@@ -24,6 +24,7 @@ from fetch_news import (
     char_trigram_overlap,
     _article_age_hours,
     STALE_BREAKING_NEWS_HOURS,
+    _dedup_window_hours,
 )
 
 
@@ -141,6 +142,21 @@ def test_stale_breaking_news_age_calc():
     )
 
 
+def test_category_specific_dedup_window():
+    """실사고(2026-08-22): "한화·리플 전격 제휴" 단독 기사가 8/21 16:11과
+    8/22 09:40, 약 17.5시간 간격으로 완전히 같은 내용으로 두 번 발송됐다.
+    전날(2026-08-20) DEDUP_WINDOW_HOURS를 6→2시간으로 줄인 여파 — 시황 오탐은
+    그 다음 날 숫자충돌가드로 이미 별도 해결됐으니 짧은 창을 유지할 이유가
+    없어진 반면, 단독/종합처럼 몇 시간~하루 간격으로 재등장하는 기사는 못
+    잡게 됐다. 그래서 카테고리별로 분리했다: 속보는 시황 실시간성 때문에
+    2시간 유지, 단독/종합은 재탕을 잡도록 12시간으로 늘림(사용자 결정)."""
+    return (
+        check("속보 창 = 2시간(시황 실시간성 유지)", _dedup_window_hours("속보") == 2)
+        and check("단독 창 = 12시간(재탕 방지로 확대)", _dedup_window_hours("단독") == 12)
+        and check("종합 창 = 12시간(재탕 방지로 확대)", _dedup_window_hours("종합") == 12)
+    )
+
+
 def test_refusal_marks():
     """실사고(2026-08-18): "본문 내용이 없어 요약할 수 없다"가 그대로 발송됨.
     실사고(2026-08-19): 뉴스핌 속보 자리채움 문구("자세한 뉴스는 곧 전해질
@@ -165,6 +181,7 @@ def main():
         test_numeric_conflict_guard(),
         test_market_term_alias_and_pct_only_conflict_guard(),
         test_stale_breaking_news_age_calc(),
+        test_category_specific_dedup_window(),
         test_refusal_marks(),
     ]
     print()
