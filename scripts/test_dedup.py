@@ -181,6 +181,33 @@ def test_self_comparison_excluded_in_stage2():
     )
 
 
+def test_correction_mismatch_guard():
+    """실사고(2026-08-22): "[속보]제주 한림항 인근서 장미란씨 추정 시신 발견…신분증
+    나와"에 이어 "[속보]제주경찰 '실종자 추정 시신발견 사실 아니다' 정보 혼선"이라는
+    정정 속보가 나왔다. 둘 다 "제주"·"실종자"·"시신"·"발견" 같은 핵심 단어를 공유하는
+    같은 사건 기사라, 문구가 겹치면(이 테스트에서는 일부러 겹치게 구성) 원보도와
+    정정보도가 "중복"으로 오판될 수 있다 — 실제로는 내용이 정반대라 절대 같은
+    걸로 묶으면 안 된다. 한쪽에만 정정 표현이 있으면 오버랩 점수와 무관하게
+    중복 아님으로 강제해야 하고, 반대로 양쪽 다 같은 정정 보도를 전한 것이면
+    (다른 매체가 같은 정정 소식을 전함) 정상적으로 중복 판정이 돼야 한다."""
+    original = ("제주 한림항 인근 해상에서 발견된 시신은 실종자 장미란 씨로 추정된다. "
+                "경찰이 신원을 확인하고 있다.")
+    retraction = ("제주 한림항 인근 해상에서 발견된 시신이 실종자 장미란 씨라는 소식은 "
+                  "사실이 아니다. 경찰이 신원을 확인하고 있다.")
+    recent_orig = [{"title": "x", "summary": original, "category": "속보"}]
+    is_dup, wo, co, _ = is_summary_duplicate(retraction, "속보", recent_orig)
+    ok = check("원보도-정정보도(문구 겹침) → 중복 아님으로 강제", not is_dup,
+               f"word={wo} char={co}")
+
+    retraction2 = ("제주 한림항 인근 해상에서 발견된 시신이 실종자 장미란 씨라는 소식은 "
+                   "사실이 아니다. 경찰 관계자가 확인했다.")
+    recent_retract = [{"title": "x", "summary": retraction, "category": "속보"}]
+    is_dup2, wo2, co2, _ = is_summary_duplicate(retraction2, "속보", recent_retract)
+    ok = check("양쪽 다 같은 정정보도(다른 매체) → 정상적으로 중복 판정",
+               is_dup2, f"word={wo2} char={co2}") and ok
+    return ok
+
+
 def test_refusal_marks():
     """실사고(2026-08-18): "본문 내용이 없어 요약할 수 없다"가 그대로 발송됨.
     실사고(2026-08-19): 뉴스핌 속보 자리채움 문구("자세한 뉴스는 곧 전해질
@@ -207,6 +234,7 @@ def main():
         test_stale_breaking_news_age_calc(),
         test_category_specific_dedup_window(),
         test_self_comparison_excluded_in_stage2(),
+        test_correction_mismatch_guard(),
         test_refusal_marks(),
     ]
     print()
