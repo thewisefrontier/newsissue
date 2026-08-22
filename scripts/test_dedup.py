@@ -157,6 +157,30 @@ def test_category_specific_dedup_window():
     )
 
 
+def test_self_comparison_excluded_in_stage2():
+    """실사고(2026-08-22): 1단계 루프가 통과한 모든 후보의 제목만 있는 항목을
+    recent_for_dedup에 즉시 넣는데, 그 리스트가 2단계 is_summary_duplicate 호출에
+    그대로 전달되면서 후보 자기 자신의 제목 항목과도 비교하게 됐다. 제목과 요약은
+    같은 사건이라 핵심 단어(예: "장미란", "한림항", "시신")가 늘 겹치므로 오버랩
+    계수가 손쉽게 임계값을 넘어 "중복"으로 오판됐다 — 실측(연속 실행 로그): 9회
+    연속 실행 중 7회가 스테이지-2 후보가 있었는데도 발송 0건. run()에서 guid로
+    자기 자신 항목만 제외하고 비교하도록 고쳤다(recent_excl_self)."""
+    guid = "test-guid-jeju-body-found"
+    title = "[속보]제주 한림항 인근서 장미란씨 추정 시신 발견…신분증 나와"
+    summary = ("제주 한림항 인근 해상에서 실종된 장미란 씨로 추정되는 시신이 발견됐다. "
+               "현장에서 신분증이 함께 나와 경찰이 정확한 신원을 확인하고 있다.")
+    recent_with_self = [{"guid": guid, "title": title, "category": "속보"}]
+    is_dup_bug, wo_bug, co_bug, _ = is_summary_duplicate(summary, "속보", recent_with_self)
+    recent_excl_self = [r for r in recent_with_self if r.get("guid") != guid]
+    is_dup_fixed, wo_fixed, co_fixed, _ = is_summary_duplicate(summary, "속보", recent_excl_self)
+    return (
+        check("버그 재현: guid 필터 없이 자기 자신과 비교하면 중복 오판", is_dup_bug,
+              f"word={wo_bug} char={co_bug}")
+        and check("수정: guid로 자기 자신 제외하면 중복 아님", not is_dup_fixed,
+                  f"word={wo_fixed} char={co_fixed}")
+    )
+
+
 def test_refusal_marks():
     """실사고(2026-08-18): "본문 내용이 없어 요약할 수 없다"가 그대로 발송됨.
     실사고(2026-08-19): 뉴스핌 속보 자리채움 문구("자세한 뉴스는 곧 전해질
@@ -182,6 +206,7 @@ def main():
         test_market_term_alias_and_pct_only_conflict_guard(),
         test_stale_breaking_news_age_calc(),
         test_category_specific_dedup_window(),
+        test_self_comparison_excluded_in_stage2(),
         test_refusal_marks(),
     ]
     print()
