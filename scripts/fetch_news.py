@@ -22,6 +22,10 @@ scripts/fetch_news.py
         (캡 방식은 폐기 — 중요한 후속 속보가 개수 제한에 걸려 묻히는 부작용이 있었다).
         시황/지수 속보(코스피·코스닥 등락, 사이드카 등)는 문구가 고정 템플릿이라
         추가 보정이 필요했다 — is_duplicate/is_summary_duplicate 옆 주석 참고.
+      비교 대상 시간창(DEDUP_WINDOW_HOURS_BY_CATEGORY)도 카테고리별로 다르다 —
+        속보는 시황처럼 몇 분 단위로 실제 값이 바뀌는 경우가 있어 짧게(2시간),
+        단독/종합은 몇 시간~하루 간격으로 재등장하는 재탕을 잡아야 해서 길게
+        (12시간) 둔다 — prune_state 옆 주석 참고.
       (Supabase/Gemini 통합 재작성 단계는 여기선 안 씀 — 우리는 자체 기사를 쓰는 게 아니라
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
 링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
@@ -130,8 +134,22 @@ DUP_SKIP_THRESHOLD = 40     # 이상이면 완전 중복(문구까지 거의 동
 DUP_REVIEW_THRESHOLD = 25   # 이상~SKIP 미만이면 애매함 → 발송하되 리뷰 로그에 기록
 # 6시간은 너무 길다는 사용자 판단으로 2시간으로 축소(2026-08-20) — "코스피 4%대"처럼
 # stage-2에서 걸러진(=한 번도 발송 안 된) 유령 항목이 6시간 내내 비교 대상에 남아있던
-# 부작용도 줄어든다. guid 재수집 방지 기간(prune_state, *4배)도 8시간으로 같이 줄어든다.
-DEDUP_WINDOW_HOURS = 2      # 이 시간 안에 보낸 기사만 비교 대상으로 삼는다
+# 부작용이 있었다. 그런데 그 문제의 진짜 원인은 창 길이가 아니라 숫자충돌가드
+# 부재였고, 그건 그 다음 날(2026-08-20) 별도로 고쳤다. 반면 2시간으로 줄인 채로
+# 두니 "한화·리플 전격 제휴" 같은 단독 기사가 17.5시간 뒤 재발행(?)돼 완전히
+# 동일한 내용으로 두 번 발송되는 새 문제가 생겼다(실사고 2026-08-22) — 단독/종합은
+# 시황처럼 몇 분 단위로 실제 값이 바뀌는 게 아니라서 창을 길게 둬도 안전하고,
+# 오히려 길게 둬야 이런 재탕을 잡는다. 그래서 카테고리별로 분리했다: 시황이
+# 자주 나오는 속보는 2시간 유지, 단독/종합은 12시간으로 늘림(2026-08-22 사용자 결정).
+DEDUP_WINDOW_HOURS_BY_CATEGORY = {
+    "속보": 2,
+    "단독": 12,
+    "종합": 12,
+}
+
+
+def _dedup_window_hours(category: str) -> int:
+    return DEDUP_WINDOW_HOURS_BY_CATEGORY.get(category, 2)
 
 # ── 본문 요약 기반 중복판정(2026-08-17, 주제 포화 캡을 대체) ────────────
 # 처음엔 "제목 캡"(주제당 최근 N건까지만)으로 "김민석 당대표 선출" 18건 폭주를
@@ -237,7 +255,10 @@ def save_state(state: dict):
 
 
 def prune_state(state: dict):
-    cutoff = now_kst() - timedelta(hours=DEDUP_WINDOW_HOURS * 4)  # guid 중복 방지는 좀 더 길게
+    # 가장 긴 카테고리 창(현재 단독/종합 12시간) 기준으로 *4배 — guid 중복 방지는
+    # 어떤 카테고리든 그보다 짧게 잘리면 안 되므로 최댓값을 쓴다.
+    max_window = max(DEDUP_WINDOW_HOURS_BY_CATEGORY.values())
+    cutoff = now_kst() - timedelta(hours=max_window * 4)  # guid 중복 방지는 좀 더 길게
     state["sent"] = [s for s in state["sent"] if s["sent_at"] >= cutoff.isoformat()]
 
 
@@ -743,8 +764,12 @@ def run():
               f"{ {m: sorted(s) for m, s in seeded.items()} }")
     sent_guids = {s["guid"] for s in state["sent"]}
 
-    dedup_cutoff = (now_kst() - timedelta(hours=DEDUP_WINDOW_HOURS)).isoformat()
-    recent_for_dedup = [s for s in state["sent"] if s["sent_at"] >= dedup_cutoff]
+    # 카테고리별로 창 길이가 다르므로(DEDUP_WINDOW_HOURS_BY_CATEGORY), 항목 자신의
+    # 카테고리 기준 컷오프를 각각 적용한다 — 하나의 전역 컷오프로는 표현 못 함.
+    recent_for_dedup = [
+        s for s in state["sent"]
+        if s["sent_at"] >= (now_kst() - timedelta(hours=_dedup_window_hours(s.get("category", "")))).isoformat()
+    ]
 
     # ── 1단계: 제목만으로 값싸게 걸러낸다(크롤링·Gemini 호출 없음) ──
     # 여기서 걸러지는 건 문구까지 거의 동일한 명백한 중복뿐이다(DUP_SKIP_THRESHOLD).
