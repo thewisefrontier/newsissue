@@ -34,6 +34,10 @@ scripts/fetch_news.py
         손쉽게 임계값을 넘어 "중복"으로 오판됨 — 실측: 연속 실행 로그 9회 중
         7회가 스테이지-2 후보가 있었는데도 발송 0건. guid로 자기 자신 항목만
         제외하고 비교하도록 고쳤다(stage-2 루프의 recent_excl_self 참고).
+      실사고(2026-08-23): dedup 문제가 아니라 발송 자체의 문제로 완전히 같은 기사가
+        10분 간격으로 4번 연속 채널에 올라간 사고도 있었다 — send_telegram 옆
+        주석 참고(텔레그램 429 응답을 재시도 없이 실패 처리해서 state에 기록이 안
+        되고, 그래서 다음 실행마다 "아직 안 보낸 기사"로 오인해 재처리했다).
       (Supabase/Gemini 통합 재작성 단계는 여기선 안 씀 — 우리는 자체 기사를 쓰는 게 아니라
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
 링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
@@ -198,6 +202,10 @@ TOPIC_STOPWORDS = {"속보", "단독", "종합", "오늘", "발표", "관련", "
 # 채팅방에 초당 1건 정도로만 안전하게 보낼 수 있어 SEND_INTERVAL_SEC 간격
 # 발송은 유지한다 — 발송 건수가 많아지면 실행 시간이 늘어날 뿐, 유실되지 않는다.
 SEND_INTERVAL_SEC = 1.5      # 발송 간 대기
+# 실사고(2026-08-23): 429 응답을 재시도 없이 바로 실패 처리해서 같은 기사가 반복
+# 재처리·재발송되는 사고가 있었다(send_telegram 옆 주석 참고) — 최대 3번(첫 시도
+# +재시도 2번)까지 retry_after를 지켜 재시도한다.
+TELEGRAM_MAX_RETRIES = 3
 
 # 모든 카테고리에서 요약을 만든다(2026-08-17) — 중복판정에 요약이 필요해졌고,
 # 사용자도 속보에 요약이 붙는 걸 확인하고 괜찮다고 했다. 비용은 늘지만
@@ -768,17 +776,37 @@ def send_telegram(item: dict) -> dict:
     link_preview_options = (
         {"prefer_small_media": True} if show_preview else {"is_disabled": True}
     )
-    res = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data={
-            "chat_id": CHAT_ID,
-            "text": msg,
-            "parse_mode": "HTML",
-            "link_preview_options": json.dumps(link_preview_options),
-        },
-        timeout=15,
-    )
-    return res.json()
+    data = {
+        "chat_id": CHAT_ID,
+        "text": msg,
+        "parse_mode": "HTML",
+        "link_preview_options": json.dumps(link_preview_options),
+    }
+    # 실사고(2026-08-23): 429(Too Many Requests)를 받으면 재시도 없이 바로 "실패"로
+    # 기록하고 넘어갔는데, 그러면 state["sent"]에도 안 남아 다음 실행에서 "아직 안
+    # 보낸 기사"로 오인해 크롤링·요약·발송을 통째로 재시도한다. 문제는 그 사이에도
+    # 텔레그램이 메시지를 실제로는 전달하는 경우가 있어(플러드 컨트롤이 API 응답과
+    # 실제 발송 큐를 분리 처리하는 것으로 보임) — 실측: "[단독] 녹조 폭발에도..."
+    # 기사가 10분 간격으로 4번 연속 채널에 올라갔는데, 매번 코드 로그엔 429로
+    # "발송 0건"이라 찍혔다. 429가 명시하는 retry_after만큼 기다렸다 재시도하면
+    # (1) 진짜로 안 갔다면 재시도로 정상 발송되고 (2) 이미 갔었다면 재시도 응답으로
+    # 확인 가능하다 — 어느 쪽이든 무한정 같은 기사를 재처리하는 사고를 막는다.
+    for attempt in range(TELEGRAM_MAX_RETRIES):
+        res = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data=data,
+            timeout=15,
+        )
+        result = res.json()
+        if result.get("ok"):
+            return result
+        retry_after = (result.get("parameters") or {}).get("retry_after")
+        if retry_after and attempt < TELEGRAM_MAX_RETRIES - 1:
+            print(f"  ⏳ 429(재시도 {attempt+1}/{TELEGRAM_MAX_RETRIES}), {retry_after}초 대기: {item['title'][:40]}")
+            time.sleep(retry_after)
+            continue
+        return result
+    return result
 
 
 # =========================
