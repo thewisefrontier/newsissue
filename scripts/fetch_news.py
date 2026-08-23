@@ -55,8 +55,11 @@ scripts/fetch_news.py
       "본문을 확인할 수 없다"류 메타응답 등) 조용히 건너뛰고 제목/출처/링크만 보낸다
       (발송 자체는 막지 않는다).
 결정 이력 로깅(2026-08-20): 중복판정 원인을 나중에 재구성할 수 있도록 Cloudflare
-      D1에 스테이지-2 판정(발송/중복스킵/도메인제외)을 전부 남긴다(log_decision).
-      실패해도(네트워크 등) 발송 흐름을 막지 않는 best-effort.
+      D1에 스테이지-2 판정(발송/중복스킵/도메인제외/발송실패)을 전부 남긴다
+      (log_decision). 실패해도(네트워크 등) 발송 흐름을 막지 않는 best-effort.
+      실사고(2026-08-23): "sent"/"dup_summary"/"excluded_domain"만 기록하고
+      발송 실패(send_failed)는 기록 안 해서, D1을 활성화해도 429 반복 재처리
+      사고가 안 보였을 것 — run() 발송 루프의 log_decision 호출 참고.
 
 실행: python scripts/fetch_news.py
 """
@@ -945,6 +948,14 @@ def run():
                          compare_text=item.get("summary", ""), summary=item.get("summary", ""))
         else:
             print(f"  ❌ 발송 실패: {res}")
+            # 실사고(2026-08-23): log_decision이 "sent"/"dup_summary"/"excluded_domain"만
+            # 기록하고 발송 실패는 아예 안 남겼다 — D1을 활성화해도 이 사고(429 반복
+            # 재처리)는 안 보였을 것이다. 실패 사유(res 전체)를 compare_text에 그대로
+            # 남겨서 다음엔 GitHub Actions 로그를 뒤지지 않고 SQL 조회로 바로 원인을
+            # 알 수 있게 한다.
+            log_decision(item["guid"], item["category"], item["title"],
+                         item.get("real_link") or item["link"], "send_failed",
+                         compare_text=str(res))
         time.sleep(SEND_INTERVAL_SEC)
 
     save_gemini_exhausted(state, _exhausted_keys)
