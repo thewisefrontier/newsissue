@@ -9,6 +9,10 @@ scripts/fetch_news.py
        태그 정규식으로 재검증 필요 — "종합"은 특히 실측상 100건 중 2건만 진짜 태그)
 중복 제거(2단계, 2026-08-17 재설계): 같은 사건을 여러 매체가 거의 동시에, 서로 다른
       구체 사실(득표율·발언 인용 등)을 섞어 보도하는 경우가 많다.
+      0단계 — 실제 언론사 URL이 완전히 같으면 100% 같은 기사다(_link_already_sent/
+        query_d1_link_exists). 텍스트 비교보다 먼저, 훨씬 저렴하게 확인해 크롤링·
+        Gemini 호출까지 갈 필요를 없앤다(2026-08-23 사용자 요청 — "제목·요약만
+        저장하지 말고 주소도 저장해서 비교하자").
       1단계 — 제목만으로 값싸게 거른다(크롤링 없음). 문구까지 거의 같은 명백한 중복만
         잡는다(DUP_SKIP_THRESHOLD, 문자 3-gram). NewsFinal auto_dedup.py 구조를
         로컬로 이식한 것.
@@ -57,9 +61,10 @@ scripts/fetch_news.py
       "본문을 확인할 수 없다"류 메타응답 등) 조용히 건너뛰고 제목/출처/링크만 보낸다
       (발송 자체는 막지 않는다).
 결정 이력 로깅(2026-08-20, 2026-08-23 활성화): 중복판정 원인을 나중에 재구성할 수
-      있도록 Cloudflare D1에 스테이지-2 판정(발송/중복스킵/도메인제외/발송실패)을
-      전부 남긴다(log_decision). 실패해도(네트워크 등) 발송 흐름을 막지 않는
-      best-effort. 이제 이 이력을 애매한 후보 재확인에도 쓴다(query_d1_recent_sent).
+      있도록 Cloudflare D1에 스테이지-2 판정(발송/중복스킵/도메인제외/발송실패/
+      링크중복)을 전부 남긴다(log_decision). 실패해도(네트워크 등) 발송 흐름을
+      막지 않는 best-effort. 이제 이 이력을 애매한 후보 재확인·링크 완전일치
+      검사에도 쓴다(query_d1_recent_sent, query_d1_link_exists).
 
 실행: python scripts/fetch_news.py
 """
@@ -283,7 +288,7 @@ def query_d1_recent_sent(category: str, since_days: int = 7, limit: int = 300) -
             f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/d1/database/{CF_D1_DATABASE_ID}/query",
             headers={"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"},
             json={
-                "sql": ("SELECT title, summary FROM decisions "
+                "sql": ("SELECT title, summary, link FROM decisions "
                         "WHERE category = ? AND decision = 'sent' AND run_at >= ? "
                         "ORDER BY id DESC LIMIT ?"),
                 "params": [category, since, limit],
@@ -294,10 +299,42 @@ def query_d1_recent_sent(category: str, since_days: int = 7, limit: int = 300) -
         if not data.get("success") or not data.get("result"):
             return []
         rows = data["result"][0].get("results") or []
-        return [{"title": r["title"], "summary": r.get("summary") or "", "category": category} for r in rows]
+        return [{"title": r["title"], "summary": r.get("summary") or "",
+                  "link": r.get("link") or "", "category": category} for r in rows]
     except Exception as e:
         print(f"  ⚠️ D1 조회 실패(무시하고 계속): {e}")
         return []
+
+
+# 실사고(2026-08-23 사용자 요청): 제목·요약은 크롤링 때마다 Gemini가 문구를 조금씩
+# 다르게 다시 써서 텍스트 비교만으로는 애매할 수 있지만, 실제 언론사 URL이 완전히
+# 같으면 100% 같은 기사다. 텍스트 비교보다 먼저(그리고 훨씬 저렴하게) 확인한다 —
+# 링크만 같으면 크롤링·Gemini 호출까지 갈 필요가 없다.
+def _link_already_sent(link: str, recent: list) -> bool:
+    return bool(link) and any(r.get("link") == link for r in recent)
+
+
+def query_d1_link_exists(link: str) -> bool:
+    """이 링크가 예전에(짧은 창 밖에서라도) 이미 발송된 적 있는지 D1에서 확인한다.
+    가벼운 존재 확인 쿼리라 후보마다 호출해도 부담이 적다. best-effort — 실패하면
+    False(기존 텍스트 비교 로직에 맡긴다, 발송 흐름을 막지 않는다)."""
+    if not (CF_ACCOUNT_ID and CF_D1_DATABASE_ID and CF_API_TOKEN) or not link:
+        return False
+    try:
+        res = requests.post(
+            f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/d1/database/{CF_D1_DATABASE_ID}/query",
+            headers={"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"},
+            json={
+                "sql": "SELECT 1 FROM decisions WHERE link = ? AND decision = 'sent' LIMIT 1",
+                "params": [link],
+            },
+            timeout=8,
+        )
+        data = res.json()
+        return bool(data.get("success") and data.get("result") and data["result"][0].get("results"))
+    except Exception as e:
+        print(f"  ⚠️ D1 링크 조회 실패(무시하고 계속): {e}")
+        return False
 
 
 # =========================
@@ -941,6 +978,18 @@ def run():
             log_decision(c["guid"], category, c["title"], c["real_link"], "excluded_domain")
             continue
 
+        # 실사고(2026-08-23 사용자 요청): 실제 URL이 완전히 같으면 100% 같은
+        # 기사다 — 텍스트 비교보다 먼저, 훨씬 저렴하게 확인한다. 이번 실행 안에서
+        # 이미 본 링크(recent_for_dedup)는 공짜로, 짧은 창을 넘어간 과거 링크는
+        # D1에서 확인한다(query_d1_link_exists). 크롤링·Gemini 호출까지 갈 필요가
+        # 없어 비용도 아낀다.
+        if _link_already_sent(c["real_link"], recent_for_dedup) or query_d1_link_exists(c["real_link"]):
+            print(f"  🔗 링크 완전 일치로 중복 생략: {c['title'][:40]}")
+            processed.append({"guid": c["guid"], "title": c["title"], "category": category,
+                               "sent_at": now_kst().isoformat()})
+            log_decision(c["guid"], category, c["title"], c["real_link"], "dup_link")
+            continue
+
         raw_text = crawl_article_text(c["real_link"])
         c["summary"] = summarize_with_gemini(c["title"], raw_text, category)
         compare_text = c["summary"] or c["title"]  # 요약 실패 시 제목으로라도 비교
@@ -988,8 +1037,11 @@ def run():
 
         to_send.append(c)
         # 이번 실행 안에서 뽑은 기사끼리도 서로 비교 대상에 넣는다(요약 캐시 포함).
+        # link도 같이 넣어야 나중 후보의 링크 완전일치 검사(_link_already_sent)가
+        # 이번 배치 안에서도 작동한다.
         recent_for_dedup.append({"guid": c["guid"], "title": c["title"], "summary": c["summary"],
-                                  "category": category, "sent_at": now_kst().isoformat()})
+                                  "link": c["real_link"], "category": category,
+                                  "sent_at": now_kst().isoformat()})
 
     print(f"발송 대상 {len(to_send)}건")
 
@@ -1002,7 +1054,8 @@ def run():
             sent_count += 1
             state["sent"].append({
                 "guid": item["guid"], "title": item["title"], "summary": item.get("summary", ""),
-                "category": item["category"], "sent_at": now_kst().isoformat(),
+                "link": item.get("real_link") or item["link"], "category": item["category"],
+                "sent_at": now_kst().isoformat(),
             })
             print(f"  ✅ [{item['category']}] {item['title'][:50]}")
             log_decision(item["guid"], item["category"], item["title"],
