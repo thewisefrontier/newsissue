@@ -25,6 +25,11 @@ from fetch_news import (
     _article_age_hours,
     STALE_BREAKING_NEWS_HOURS,
     _dedup_window_hours,
+    _is_summary_borderline,
+    SUMMARY_WORD_OVERLAP_THRESHOLD,
+    SUMMARY_CHAR_TRIGRAM_OVERLAP_THRESHOLD,
+    SUMMARY_BORDERLINE_MARGIN,
+    _link_already_sent,
 )
 
 
@@ -208,6 +213,43 @@ def test_correction_mismatch_guard():
     return ok
 
 
+def test_summary_borderline_detection():
+    """2026-08-23 사용자 요청: 짧은 창(recent_for_dedup) 비교로 "중복 아님"이
+    나왔지만 임계값에 아슬아슬하게 못 미치는 애매한 점수는, D1에서 더 긴 기간을
+    추가 조회해 재확인한다(query_d1_recent_sent). 재확인을 언제 트리거할지
+    판정하는 _is_summary_borderline이 임계값-마진 경계를 올바르게 나누는지
+    확인한다 — 실제 네트워크 호출(query_d1_recent_sent)은 이 테스트 스위트가
+    검증하는 범위 밖(다른 함수들처럼 네트워크 의존 부분은 별도 단위 테스트 안 함)."""
+    word_edge = SUMMARY_WORD_OVERLAP_THRESHOLD - SUMMARY_BORDERLINE_MARGIN
+    char_edge = SUMMARY_CHAR_TRIGRAM_OVERLAP_THRESHOLD - SUMMARY_BORDERLINE_MARGIN
+    return (
+        check(f"단어 {word_edge}%(마진 경계) → 애매함으로 판정",
+              _is_summary_borderline(word_edge, 0))
+        and check(f"단어 {word_edge - 1}%(경계 미만) → 애매하지 않음",
+                  not _is_summary_borderline(word_edge - 1, 0))
+        and check(f"문자 {char_edge}%(마진 경계) → 애매함으로 판정",
+                  _is_summary_borderline(0, char_edge))
+        and check("둘 다 0% → 애매하지 않음(명백히 다른 기사)",
+                  not _is_summary_borderline(0, 0))
+    )
+
+
+def test_link_exact_match():
+    """2026-08-23 사용자 요청: 제목·요약은 Gemini가 크롤링할 때마다 문구를 조금씩
+    다르게 다시 써서 텍스트 비교만으로는 애매할 수 있지만, 실제 언론사 URL이
+    완전히 같으면 100% 같은 기사다. _link_already_sent(짧은 창 안, 무료)와
+    query_d1_link_exists(짧은 창 밖, D1 조회 — 네트워크 의존이라 이 스위트에서는
+    테스트 안 함)로 텍스트 비교보다 먼저, 더 저렴하게 확인한다."""
+    recent = [{"link": "https://example.com/news/123", "category": "단독"}]
+    return (
+        check("완전히 같은 링크 → 이미 보냄으로 판정",
+              _link_already_sent("https://example.com/news/123", recent))
+        and check("다른 링크 → 판정 안 됨",
+                  not _link_already_sent("https://example.com/news/999", recent))
+        and check("빈 링크 → 판정 안 됨(오탐 방지)", not _link_already_sent("", recent))
+    )
+
+
 def test_refusal_marks():
     """실사고(2026-08-18): "본문 내용이 없어 요약할 수 없다"가 그대로 발송됨.
     실사고(2026-08-19): 뉴스핌 속보 자리채움 문구("자세한 뉴스는 곧 전해질
@@ -235,6 +277,8 @@ def main():
         test_category_specific_dedup_window(),
         test_self_comparison_excluded_in_stage2(),
         test_correction_mismatch_guard(),
+        test_summary_borderline_detection(),
+        test_link_exact_match(),
         test_refusal_marks(),
     ]
     print()
