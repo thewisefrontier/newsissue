@@ -457,27 +457,20 @@ def prune_state(state: dict):
 # TELEGRAM
 # =========================
 
-def send_telegram(source: dict, title: str, url: str, views, comments, recommend) -> dict:
+def send_telegram(source: dict, title: str, url: str) -> dict:
+    """조회수·댓글수·추천수는 문턱값 판정(run())에만 쓰고 메시지엔 안 넣는다 —
+    사용자 피드백(2026-08-25): 숫자 나열보다 텔레그램 자동 링크 미리보기(썸네일+
+    본문 일부)가 실제로 뭔 글인지 파악하는 데 더 유용하다. 그래서
+    link_preview_options로 미리보기를 끄지 않는다 — 메시지에 있는 첫 링크
+    (제목 링크, 곧 원문)를 텔레그램이 자동으로 카드로 붙여준다."""
     title_safe = html.escape(title)
     title_linked = f'<a href="{url}">{title_safe}</a>'
-    metrics = []
-    if views is not None:
-        metrics.append(f"👀 {views:,}")
-    if comments is not None:
-        metrics.append(f"💬 {comments:,}")
-    if recommend is not None:
-        metrics.append(f"👍 {recommend:,}")
-    metrics_block = f"\n\n{' · '.join(metrics)}" if metrics else ""
-    footer_line = (
-        f"\n\n📎 <a href=\"{url}\">원문</a> | "
-        f"<a href=\"{CHANNEL_URL}\">{CHANNEL_TAG}</a>"
-    )
-    msg = f"{source['emoji']} [{source['name']}] {title_linked}{metrics_block}{footer_line}"
+    footer_line = f"\n\n<a href=\"{CHANNEL_URL}\">{CHANNEL_TAG}</a>"
+    msg = f"{source['emoji']} [{source['name']}] {title_linked}{footer_line}"
     data = {
         "chat_id": CHAT_ID,
         "text": msg,
         "parse_mode": "HTML",
-        "link_preview_options": json.dumps({"is_disabled": True}),
     }
     # fetch_news.py의 send_telegram과 동일한 429 재시도 로직 — 텔레그램 플러드
     # 컨트롤이 API 응답과 실제 발송을 분리 처리하는 문제가 여기도 똑같이 적용될
@@ -548,7 +541,7 @@ def run():
             if min_views is not None and (views is None or views < min_views):
                 continue
 
-            res = send_telegram(source, title, url, views, comments, recommend)
+            res = send_telegram(source, title, url)
             if res.get("ok"):
                 sent_count += 1
                 new_entries.append({"guid": guid, "source": source["id"], "sent_at": now_kst().isoformat()})
