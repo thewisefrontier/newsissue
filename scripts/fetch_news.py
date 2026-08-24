@@ -918,8 +918,12 @@ def send_telegram(item: dict) -> dict:
     # 미리보기를 보여줄 땐 큰 사진 대신 작은 썸네일로(2026-08-21 사용자 요청) —
     # 구식 disable_web_page_preview 대신 신식 link_preview_options를 쓴다.
     # Bot API는 object 파라미터를 JSON 문자열로 받는다.
+    # ⚠️ Bot API 문서: prefer_small_media는 url을 명시적으로 같이 안 주면
+    # 무시된다 — wise-frontier(NewsFinal) 프로젝트가 2026-08-18에 이미 이
+    # 문제를 겪고 고친 기록이 있다(gemini_writer.py). 여기도 처음부터 놓쳐
+    # 있었던 걸 2026-08-25에 커뮤니티 기능 디버깅 중 발견해 같이 고쳤다.
     link_preview_options = (
-        {"prefer_small_media": True} if show_preview else {"is_disabled": True}
+        {"prefer_small_media": True, "url": link} if show_preview else {"is_disabled": True}
     )
     data = {
         "chat_id": CHAT_ID,
