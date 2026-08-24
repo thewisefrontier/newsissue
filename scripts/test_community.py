@@ -12,9 +12,10 @@ fetch_community.py 파서 회귀 테스트.
 
 import sys
 
+import fetch_community as fc
 from fetch_community import (
     parse_ruliweb, parse_theqoo, parse_dcinside, parse_clien, parse_inven, parse_ppomppu,
-    _is_risky_title,
+    _is_risky_title, _looks_like_yes, is_risky_by_gemini,
 )
 
 
@@ -247,6 +248,42 @@ def test_is_risky_title():
     )
 
 
+def test_looks_like_yes():
+    return (
+        check("'예'로 시작하면 True", _looks_like_yes("예"))
+        and check("'예.'처럼 문장부호 붙어도 True", _looks_like_yes("예."))
+        and check("'아니오'는 False", not _looks_like_yes("아니오"))
+        and check("빈 문자열은 False", not _looks_like_yes(""))
+    )
+
+
+def test_is_risky_by_gemini_fails_open():
+    """이 검사가 죽어도(키 없음, 네트워크 실패) 발송 전체를 막지 않고 통과시켜야
+    한다 — fetch_news.py의 요약 실패 처리와 동일한 방침. 실제 API는 호출하지
+    않는다(수동 실측은 이미 확인함, 여기서는 폴백 경로만 확정적으로 검증)."""
+    original_keys = fc.GEMINI_API_KEYS
+    original_post = fc.requests.post
+    try:
+        fc.GEMINI_API_KEYS = []
+        no_keys_result = is_risky_by_gemini("아무 제목")
+
+        fc.GEMINI_API_KEYS = ["dummy-key"]
+
+        def _raise(*args, **kwargs):
+            raise ConnectionError("네트워크 실패 시뮬레이션")
+
+        fc.requests.post = _raise
+        network_fail_result = is_risky_by_gemini("아무 제목")
+    finally:
+        fc.GEMINI_API_KEYS = original_keys
+        fc.requests.post = original_post
+
+    return (
+        check("키 없으면 False(통과)", no_keys_result is False)
+        and check("네트워크 실패해도 False(통과)", network_fail_result is False)
+    )
+
+
 def main():
     results = [
         test_parse_ruliweb(),
@@ -256,6 +293,8 @@ def main():
         test_parse_inven(),
         test_parse_ppomppu(),
         test_is_risky_title(),
+        test_looks_like_yes(),
+        test_is_risky_by_gemini_fails_open(),
     ]
     print()
     if all(results):
