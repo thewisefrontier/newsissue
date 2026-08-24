@@ -15,7 +15,9 @@ scripts/fetch_news.py
         저장하지 말고 주소도 저장해서 비교하자").
       1단계 — 제목만으로 값싸게 거른다(크롤링 없음). 문구까지 거의 같은 명백한 중복만
         잡는다(DUP_SKIP_THRESHOLD, 문자 3-gram). NewsFinal auto_dedup.py 구조를
-        로컬로 이식한 것.
+        로컬로 이식한 것. 단, 단독/종합에서 제목이 겹쳐 스킵 후보가 되면 실제 URL을
+        먼저 확인한다 — 같은 언론사·다른 주소 = 후속 기사다(2026-08-24 사용자 요청,
+        _should_bypass_title_dup 참고).
       2단계 — 1단계를 통과한 후보만 본문을 크롤링·Gemini 요약한 뒤, 그 요약끼리
         비교한다(is_summary_duplicate). 제목만으로는 "같은 사건, 다른 표현"과
         "같은 사건, 다른 후속 사실"을 구분하지 못한다 — 실측(2026-08-17): 문화일보·
@@ -51,6 +53,10 @@ scripts/fetch_news.py
         다른 사실)이 요약 실패로 제목만 비교됐는데, 셋 다 짧고 상투적인 문구를
         공유해 문자 3-gram 오버랩만 가짜로 임계값을 넘어 서로를 중복 처리, 발송
         0건이 됐다 — is_summary_duplicate의 title_only 분기 참고.
+      실사고(2026-08-24, 사용자 요청): "위너즈 코인" 단독 후속 사례처럼 같은
+        언론사·다른 주소는 그 자체로 다른(대개 후속) 기사다 — 언론사가 별개 URL에
+        완전히 같은 기사를 중복 게시하는 일은 없기 때문. 그런데 1단계는 제목만
+        보고 스킵해 이런 후속 단독을 놓쳤다 — _should_bypass_title_dup 참고.
       (Supabase/Gemini 통합 재작성 단계는 여기선 안 씀 — 우리는 자체 기사를 쓰는 게 아니라
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
 링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
@@ -518,18 +524,39 @@ def _correction_mismatch(a: str, b: str) -> bool:
 
 
 def is_duplicate(title: str, category: str, recent: list):
-    """최근 발송분과 제목 유사도 비교. (is_dup, score, matched_title) 반환."""
-    best_score, best_title = 0.0, ""
+    """최근 발송분과 제목 유사도 비교. (is_dup, score, matched_title, matched_link) 반환.
+
+    matched_link: 가장 잘 매칭된 과거 항목의 실제 URL(있으면). run()의 단독/종합
+    후속기사 예외 판단에 쓰인다 — _should_bypass_title_dup 참고. state["sent"]에서
+    복원된 항목은 link가 있지만, 이번 실행 stage-1 배치 안에서 방금 추가된 항목은
+    아직 URL을 안 풀어봐서 없을 수 있다(빈 문자열)."""
+    best_score, best_title, best_link = 0.0, "", ""
     for item in recent:
         if item.get("category") != category:
             continue
         score = title_similarity(title, item["title"])
         if score > best_score:
-            best_score, best_title = score, item["title"]
+            best_score, best_title, best_link = score, item["title"], item.get("link", "")
     is_dup = best_score >= DUP_SKIP_THRESHOLD
     if is_dup and (_numbers_conflict(title, best_title) or _correction_mismatch(title, best_title)):
         is_dup = False
-    return is_dup, round(best_score, 1), best_title
+    return is_dup, round(best_score, 1), best_title, best_link
+
+
+# 실사고(2026-08-24 사용자 요청): 같은 언론사·다른 주소 = 후속 기사다("위너즈 코인"
+# 단독 후속 사례) — 사용자 확인: 언론사가 실제로 존재하는 별개 URL에 완전히 같은
+# 기사를 중복 게시하는 일은 없으니, 주소가 다르면 그 자체로 다른(대개 후속) 기사로
+# 취급해야 한다("~일 수 있다"는 추측이 아니라 확정). 그런데 제목만 보고 1단계에서
+# 바로 스킵하면 이런 후속 단독을 놓친다. 다만 이 시점(1단계)엔 아직 구글 뉴스
+# 리다이렉트 링크뿐이라 실제 언론사 URL을 모른다(본문 크롤링 직전에야 해석됨) —
+# 그래서 제목이 겹쳐 스킵 후보가 된 경우에 한해 URL 해석만 먼저 해본다(LLM 호출
+# 없는 가벼운 디코딩이라 스킵 대상에만 적용해도 비용 부담이 적다). 과거 매칭된
+# 기사의 링크를 알고 있고(matched_link) 실제로 다르면 스킵을 취소한다 — matched_link를
+# 모르면(과거 항목에 링크 정보가 없는 경우) 판단 근거가 없으므로 안전하게 기존
+# 스킵을 유지한다. 속보는 2보/3보 같은 별도 갱신 관행이 있어 이 예외를 적용하지
+# 않는다(사용자도 "그 로직은 더 고민이 필요하다"고 확인 — 별개 트랙으로 미룸).
+def _should_bypass_title_dup(category: str, matched_link: str, real_link: str) -> bool:
+    return category in ("단독", "종합") and bool(matched_link) and bool(real_link) and real_link != matched_link
 
 
 def _keywords(title: str) -> set:
@@ -966,7 +993,15 @@ def run():
             if c["guid"] in sent_guids:
                 continue  # 이미 처리한 기사(같은 기사 재수집)
 
-            is_dup, score, matched = is_duplicate(c["title"], category, recent_for_dedup)
+            is_dup, score, matched, matched_link = is_duplicate(c["title"], category, recent_for_dedup)
+            if is_dup and category in ("단독", "종합") and matched_link:
+                # 실사고(2026-08-24 사용자 요청): 같은 언론사·다른 주소 = 후속 기사다 —
+                # 제목만 보고 스킵하기 전에 실제 URL을 확인한다. _should_bypass_title_dup
+                # 옆 주석 참고.
+                c["real_link"] = resolve_real_url(c["link"])
+                if _should_bypass_title_dup(category, matched_link, c["real_link"]):
+                    print(f"  🔗 제목 유사({score}%)하지만 실제 링크가 달라 후속 기사로 판단, 본문 확인으로: {c['title'][:40]}")
+                    is_dup = False
             if is_dup:
                 print(f"  ⏭️  제목 중복 생략 ({score}%): {c['title'][:40]} ≈ {matched[:40]}")
                 continue
@@ -977,9 +1012,11 @@ def run():
             stage1.append(c)
             # 이번 배치 안의 다른 후보와도 비교되도록 즉시 추가한다(위 실사고의 원인).
             # guid를 반드시 같이 저장한다 — 안 그러면 스테이지2에서 자기 자신과
-            # 비교하는 사고가 난다(바로 아래 stage-2 루프 주석 참고).
+            # 비교하는 사고가 난다(바로 아래 stage-2 루프 주석 참고). link도 이미
+            # 풀어봤으면(위 후속기사 예외 판단 때) 같이 저장해 다음 후보의 URL
+            # 비교에도 쓰인다.
             recent_for_dedup.append({"guid": c["guid"], "title": c["title"], "category": category,
-                                      "sent_at": now_kst().isoformat()})
+                                      "link": c.get("real_link", ""), "sent_at": now_kst().isoformat()})
 
     print(f"본문 확인 대상 {len(stage1)}건")
 
@@ -989,7 +1026,8 @@ def run():
 
     for c in stage1:
         category = c["category"]
-        c["real_link"] = resolve_real_url(c["link"])
+        # 후속기사 예외 판단(1단계)에서 이미 풀어봤으면 재사용 — 중복 디코딩 방지.
+        c["real_link"] = c.get("real_link") or resolve_real_url(c["link"])
 
         domain = urlparse(c["real_link"]).netloc.replace("www.", "")
         if domain in EXCLUDE_LINK_DOMAINS:
