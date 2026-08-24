@@ -17,16 +17,15 @@ fetch_news.py(뉴스 RSS)와는 소스 종류·판정 방식이 완전히 달라
    않는다 — `User-agent: *` 규칙만 우리에게 실제로 적용된다.
 2) 로그인·JS 렌더·Cloudflare 봇 챌린지가 없을 것(인스티즈는 robots.txt 요청부터
    Cloudflare JS 챌린지 페이지가 와서 제외 — 우회하지 않는다).
-3) 게시판 자체가 "베스트/개념글/HOT"으로 이미 걸러준 목록일 것 — 그래야 우리가
-   별도 스코어링 없이 "새 글 = 베스트 새 글"로 바로 취급할 수 있다. 클리앙
-   모두의공원·인벤 오픈이슈·뽐뿌 자유게시판처럼 전체 최신글 목록만 있고 베스트
-   필터가 없는 곳은 이번 1차 범위에서 뺐다(자체 스코어링이 필요해 범위가 커짐 —
-   추후 검토).
+3) 게시판 자체가 "베스트/개념글/HOT"으로 이미 걸러준 목록이면 문턱값 없이 새 글
+   전부를 보낸다(소스 1). 클리앙 모두의공원·인벤 오픈이슈·뽐뿌 자유게시판처럼
+   전체 최신글 목록만 있고 베스트 필터가 없는 곳은(소스 2) 대신 직접 문턱값
+   (추천수 또는 조회수)을 넘는 새 글만 보낸다 — 아래 "소스 2" 항목 참고.
 4) 목록 페이지만 요청한다 — 개별 글 페이지는 절대 크롤링하지 않는다(링크로만
    노출). 요약도 만들지 않는다 — 커뮤니티 글은 뉴스와 달리 본문 검증이 중요하지
    않고, 크롤링 범위를 목록에만 묶어두는 게 예의에도 맞다.
 
-**1차 소스 4곳**(전부 위 기준 확인 완료):
+**소스 1(네이티브 "베스트" 게시판, 문턱값 없이 새 글 전부 발송) — 4곳**:
 - 루리웹 베스트(`/best/all`) — robots.txt에 걸리는 쿼리 패턴(`orderby=` 등) 없이
   기본 URL 그대로 실시간 베스트가 나온다.
 - 더쿠 HOT(`/hot`) — robots.txt가 404(규칙 없음), 목록 페이지 정상 응답.
@@ -34,15 +33,23 @@ fetch_news.py(뉴스 RSS)와는 소스 종류·판정 방식이 완전히 달라
   갤러리별 차단 14곳에 안 들어있다(부동산갤은 옛날 개별 글 2건만 차단, 목록은
   허용). `exception_mode=recommend`로 개념글(추천 컷 통과글)만 가져온다.
 
-제외한 곳: 클리앙·인벤·뽐뿌(베스트 필터 없음, 추후 검토), 웃긴대학(robots.txt가
-`User-agent: *`에도 `/board/best/`를 명시적으로 막음 — 봇 이름과 무관하게 모두에게
-적용되는 규칙), 인스티즈(Cloudflare 봇 챌린지, 우회 안 함), DC인사이드의 다른
-갤러리들(로봇 배제 목록에 있거나 이번엔 검토 안 함).
+**소스 2(베스트 필터가 없는 전체 최신글 게시판, 문턱값 넘는 새 글만 발송,
+2026-08-25 사용자 요청으로 추가) — 3곳**: 클리앙 모두의공원(`min_recommend`),
+인벤 오픈이슈갤러리(`min_recommend`), 뽐뿌 자유게시판(`min_views` — 이 곳만
+추천수 표기가 실측상 20건 중 1건 꼴로만 채워져 있어 조회수를 대신 쓴다). 각
+파서 옆 주석에 실측 분포와 문턱값 근거가 있다 — 채널이 너무 시끄럽거나 너무
+조용하면 SOURCES의 `min_recommend`/`min_views` 값을 조정할 것.
+
+제외한 곳: 웃긴대학(robots.txt가 `User-agent: *`에도 `/board/best/`를 명시적으로
+막음 — 봇 이름과 무관하게 모두에게 적용되는 규칙), 인스티즈(Cloudflare 봇 챌린지,
+우회 안 함), DC인사이드의 다른 갤러리들(로봇 배제 목록에 있거나 이번엔 검토 안 함).
 
 **첫 실행 부트스트랩**: 상태 파일이 비어 있는 첫 실행에 그 시점 베스트 목록
 전체를 "새 글"로 보면 한 번에 수십 건이 쏟아진다. 그래서 소스별로 이번이 첫
 수집이면(상태 파일에 해당 소스 기록이 전무하면) 발송하지 않고 현재 목록을
 "이미 본 것"으로만 기록한다 — 다음 실행부터 진짜 신규 글만 실시간으로 나간다.
+소스 2(문턱값 소스)는 문턱값 미만인 글을 발송만 안 할 뿐 guid를 기록하지 않으므로,
+나중에 추천·조회가 늘어 문턱값을 넘으면 그때 다시 후보로 잡혀 보내진다.
 
 실행: python scripts/fetch_community.py
 """
@@ -115,9 +122,10 @@ def _to_int(text: str) -> int | None:
 # =========================
 # 소스별 파서
 # =========================
-# 각 파서는 (title, url, views, comments) 튜플의 리스트를 반환한다. 얻을 수 없는
-# 지표는 None — 임의로 만들어내지 않는다(추정값을 넣으면 나중에 진짜 값과
-# 헷갈린다).
+# 각 파서는 (title, url, views, comments, recommend) 튜플의 리스트를 반환한다.
+# 얻을 수 없는 지표는 None — 임의로 만들어내지 않는다(추정값을 넣으면 나중에
+# 진짜 값과 헷갈린다). recommend는 소스 2(베스트 필터 없는 게시판)의 문턱값
+# 판정에 쓰인다 — SOURCES의 min_recommend/min_views 참고.
 
 _RULIWEB_ROW_RE = re.compile(
     r'<tr class="table_body[^"]*">(?P<row>.*?)</tr>', re.DOTALL)
@@ -128,6 +136,9 @@ _RULIWEB_LINK_RE = re.compile(
 _RULIWEB_TITLE_RE = re.compile(r'<(?:strong|span) class="text_over">(?P<title>.*?)</(?:strong|span)>', re.DOTALL)
 _RULIWEB_HIT_RE = re.compile(r'<td class="hit">\s*([\d,]+)\s*</td>')
 _RULIWEB_REPLY_RE = re.compile(r'\((\d+)\)')
+
+
+_RULIWEB_RECOMD_RE = re.compile(r'<td class="recomd">\s*([\d,]+)\s*</td>')
 
 
 def parse_ruliweb(html_text: str) -> list:
@@ -145,6 +156,7 @@ def parse_ruliweb(html_text: str) -> list:
         title = _strip_tags(title_m.group("title")) if title_m else ""
         reply_m = _RULIWEB_REPLY_RE.search(link_m.group("inner"))
         hit_m = _RULIWEB_HIT_RE.search(row)
+        recomd_m = _RULIWEB_RECOMD_RE.search(row)
         if not title:
             continue
         url = "https://bbs.ruliweb.com" + link_m.group("href")
@@ -153,6 +165,7 @@ def parse_ruliweb(html_text: str) -> list:
             url,
             _to_int(hit_m.group(1)) if hit_m else None,
             int(reply_m.group(1)) if reply_m else None,
+            _to_int(recomd_m.group(1)) if recomd_m else None,
         ))
     return items
 
@@ -184,6 +197,7 @@ def parse_theqoo(html_text: str) -> list:
             url,
             _to_int(views_m.group(1)) if views_m else None,
             int(reply_m.group(1)) if reply_m else None,
+            None,  # 더쿠 HOT 목록엔 추천수가 없다
         ))
     return items
 
@@ -194,6 +208,7 @@ _DC_TITLE_CELL_RE = re.compile(r'<td class="gall_tit[^"]*">(?P<cell>.*?)</td>', 
 _DC_LINK_RE = re.compile(r'<a\s+href="(?P<href>/board/view/\?[^"]+)"[^>]*>(?P<inner>.*?)</a>', re.DOTALL)
 _DC_REPLY_RE = re.compile(r'class="reply_num">\[?(\d+)\]?<')
 _DC_COUNT_RE = re.compile(r'<td class="gall_count">([\d,]+|-)</td>')
+_DC_RECOMMEND_RE = re.compile(r'<td class="gall_recommend">([\d,]+|-)</td>')
 
 
 def parse_dcinside(html_text: str) -> list:
@@ -215,12 +230,123 @@ def parse_dcinside(html_text: str) -> list:
             continue
         reply_m = _DC_REPLY_RE.search(cell)
         count_m = _DC_COUNT_RE.search(row)
+        recommend_m = _DC_RECOMMEND_RE.search(row)
         url = "https://gall.dcinside.com" + html.unescape(link_m.group("href"))
         items.append((
             title,
             url,
             _to_int(count_m.group(1)) if count_m else None,
             int(reply_m.group(1)) if reply_m else None,
+            _to_int(recommend_m.group(1)) if recommend_m else None,
+        ))
+    return items
+
+
+_CLIEN_OPEN_RE = re.compile(
+    r'<div class="list_item symph_row[^"]*"[^>]*data-board-sn=(?P<sn>\d+)[^>]*data-comment-count=(?P<comment>\d+)')
+_CLIEN_TITLE_RE = re.compile(r'<span class="subject_fixed"[^>]*title="(?P<title>[^"]*)"')
+_CLIEN_HIT_RE = re.compile(r'<div class="list_hit">\s*<span class="hit">([\d,]+)</span>', re.DOTALL)
+_CLIEN_LIKE_RE = re.compile(r'data-role="list-like-count"><span>(\d+)</span>')
+
+
+def parse_clien(html_text: str) -> list:
+    """클리앙 모두의공원. `div`는 `<tr>`처럼 명확한 닫는 태그로 한 행을 자를 수
+    없어서(중첩 div가 많음), 여는 태그(data-board-sn·data-comment-count가 이미
+    거기 있음)의 위치를 기준으로 다음 글 시작 전까지를 한 행으로 슬라이스한다.
+    공지(`list_item notice`)·광고(`list_item hongbo`)는 `symph_row` 클래스와
+    `data-board-sn` 속성이 없어 이 정규식에서 자연히 제외된다."""
+    items = []
+    opens = list(_CLIEN_OPEN_RE.finditer(html_text))
+    for i, m in enumerate(opens):
+        end = opens[i + 1].start() if i + 1 < len(opens) else len(html_text)
+        row = html_text[m.start():end]
+        title_m = _CLIEN_TITLE_RE.search(row)
+        if not title_m:
+            continue
+        title = html.unescape(title_m.group("title")).strip()
+        if not title:
+            continue
+        hit_m = _CLIEN_HIT_RE.search(row)
+        like_m = _CLIEN_LIKE_RE.search(row)
+        url = f"https://www.clien.net/service/board/park/{m.group('sn')}"
+        items.append((
+            title,
+            url,
+            _to_int(hit_m.group(1)) if hit_m else None,
+            int(m.group("comment")),
+            int(like_m.group(1)) if like_m else None,
+        ))
+    return items
+
+
+_INVEN_ROW_RE = re.compile(r'<tr class="(?P<cls>[^"]*)">(?P<row>.*?)</tr>', re.DOTALL)
+_INVEN_LINK_RE = re.compile(
+    r'<a class="subject-link" href="(?P<href>https://www\.inven\.co\.kr/board/webzine/2097/\d+)">(?P<inner>.*?)</a>',
+    re.DOTALL)
+_INVEN_COMMENT_RE = re.compile(r'class="con-comment">\[(\d+)\]')
+_INVEN_VIEW_RE = re.compile(r'<td class="view">([\d,]+)</td>')
+_INVEN_RECO_RE = re.compile(r'<td class="reco">(\d+)</td>')
+
+
+def parse_inven(html_text: str) -> list:
+    """인벤 오픈이슈갤러리. 공지 행은 `<tr class="notice all">`라 class 속성에
+    "notice"가 있으면 제외한다(실제 글 행은 `<tr class="">`)."""
+    items = []
+    for m in _INVEN_ROW_RE.finditer(html_text):
+        if "notice" in m.group("cls"):
+            continue
+        row = m.group("row")
+        link_m = _INVEN_LINK_RE.search(row)
+        if not link_m:
+            continue
+        title = _strip_tags(link_m.group("inner"))
+        if not title:
+            continue
+        comment_m = _INVEN_COMMENT_RE.search(row)
+        view_m = _INVEN_VIEW_RE.search(row)
+        reco_m = _INVEN_RECO_RE.search(row)
+        items.append((
+            title,
+            link_m.group("href"),
+            _to_int(view_m.group(1)) if view_m else None,
+            int(comment_m.group(1)) if comment_m else None,
+            int(reco_m.group(1)) if reco_m else None,
+        ))
+    return items
+
+
+_PPOMPPU_ROW_RE = re.compile(r'<tr align="center" class="baseList ">(?P<row>.*?)</tr>', re.DOTALL)
+_PPOMPPU_TITLE_RE = re.compile(
+    r'<a class="baseList-title[^"]*"\s+href="(?P<href>view\.php\?[^"]+)"[^>]*><span>(?P<title>.*?)</span></a>',
+    re.DOTALL)
+_PPOMPPU_COMMENT_RE = re.compile(r'class="baseList-c"[^>]*>(\d+)</span>')
+_PPOMPPU_VIEWS_RE = re.compile(r'baseList-views"\s*colspan="2">([\d,]*)</td>')
+_PPOMPPU_REC_RE = re.compile(r'baseList-rec"\s*colspan="2">([\d,]*)</td>')
+
+
+def parse_ppomppu(html_text: str) -> list:
+    """뽐뿌 자유게시판. 추천수(`baseList-rec`)는 실측상 20건 중 1건 꼴로만 채워져
+    있어(일정 추천을 넘겨야 표시되는 듯) 임계값 신호로 못 쓴다 — 대신 항상 채워지는
+    조회수를 임계값 신호로 쓴다(SOURCES의 min_views 참고)."""
+    items = []
+    for m in _PPOMPPU_ROW_RE.finditer(html_text):
+        row = m.group("row")
+        title_m = _PPOMPPU_TITLE_RE.search(row)
+        if not title_m:
+            continue
+        title = _strip_tags(title_m.group("title"))
+        if not title:
+            continue
+        comment_m = _PPOMPPU_COMMENT_RE.search(row)
+        views_m = _PPOMPPU_VIEWS_RE.search(row)
+        rec_m = _PPOMPPU_REC_RE.search(row)
+        url = "https://www.ppomppu.co.kr/zboard/" + title_m.group("href")
+        items.append((
+            title,
+            url,
+            _to_int(views_m.group(1)) if views_m else None,
+            int(comment_m.group(1)) if comment_m else None,
+            _to_int(rec_m.group(1)) if rec_m else None,
         ))
     return items
 
@@ -253,6 +379,34 @@ SOURCES = [
         "emoji": "🟢",
         "url": "https://gall.dcinside.com/board/lists/?id=immovables&exception_mode=recommend",
         "parse": parse_dcinside,
+    },
+    # 아래 3곳은 사이트 자체에 "베스트" 게시판이 없다(전체 최신글 목록만 있음) —
+    # 2026-08-25 사용자 요청으로 추가하면서, 직접 문턱값(추천수 또는 조회수)을
+    # 넘는 새 글만 보내도록 했다. 문턱값은 실측 분포(각 소스 파서 옆 주석 참고)로
+    # 대략 잡은 초깃값이라, 채널이 너무 시끄럽거나 너무 조용하면 조정이 필요하다.
+    {
+        "id": "clien",
+        "name": "클리앙 모두의공원",
+        "emoji": "🟠",
+        "url": "https://www.clien.net/service/board/park",
+        "parse": parse_clien,
+        "min_recommend": 5,
+    },
+    {
+        "id": "inven",
+        "name": "인벤 오픈이슈갤러리",
+        "emoji": "🟠",
+        "url": "https://www.inven.co.kr/board/webzine/2097",
+        "parse": parse_inven,
+        "min_recommend": 5,
+    },
+    {
+        "id": "ppomppu",
+        "name": "뽐뿌 자유게시판",
+        "emoji": "🟠",
+        "url": "https://www.ppomppu.co.kr/zboard/zboard.php?id=freeboard",
+        "parse": parse_ppomppu,
+        "min_views": 500,
     },
 ]
 
@@ -303,7 +457,7 @@ def prune_state(state: dict):
 # TELEGRAM
 # =========================
 
-def send_telegram(source: dict, title: str, url: str, views, comments) -> dict:
+def send_telegram(source: dict, title: str, url: str, views, comments, recommend) -> dict:
     title_safe = html.escape(title)
     title_linked = f'<a href="{url}">{title_safe}</a>'
     metrics = []
@@ -311,6 +465,8 @@ def send_telegram(source: dict, title: str, url: str, views, comments) -> dict:
         metrics.append(f"👀 {views:,}")
     if comments is not None:
         metrics.append(f"💬 {comments:,}")
+    if recommend is not None:
+        metrics.append(f"👍 {recommend:,}")
     metrics_block = f"\n\n{' · '.join(metrics)}" if metrics else ""
     footer_line = (
         f"\n\n📎 <a href=\"{url}\">원문</a> | "
@@ -371,7 +527,10 @@ def run():
         if is_bootstrap and items:
             print(f"  🌱 {source['name']} 첫 수집 — 발송 없이 기준선만 기록")
 
-        for title, url, views, comments in items:
+        min_recommend = source.get("min_recommend")
+        min_views = source.get("min_views")
+
+        for title, url, views, comments, recommend in items:
             guid = hashlib.md5(url.encode("utf-8")).hexdigest()
             if guid in sent_guids:
                 continue
@@ -381,7 +540,15 @@ def run():
                 sent_guids.add(guid)
                 continue
 
-            res = send_telegram(source, title, url, views, comments)
+            # 사이트 자체에 "베스트" 필터가 없는 소스(클리앙·인벤·뽐뿌)는 문턱값
+            # 미만이면 그냥 건너뛴다 — sent_guids에 기록하지 않으므로 나중에
+            # 문턱값을 넘으면(추천·조회가 계속 늘어) 그때 다시 후보로 잡혀 보내진다.
+            if min_recommend is not None and (recommend is None or recommend < min_recommend):
+                continue
+            if min_views is not None and (views is None or views < min_views):
+                continue
+
+            res = send_telegram(source, title, url, views, comments, recommend)
             if res.get("ok"):
                 sent_count += 1
                 new_entries.append({"guid": guid, "source": source["id"], "sent_at": now_kst().isoformat()})
