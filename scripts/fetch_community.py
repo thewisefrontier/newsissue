@@ -603,7 +603,10 @@ def send_telegram(source: dict, title: str, url: str, summary: str = "") -> dict
     마다 다름)로 충분하고, 어느 글인지는 미리보기 카드로 바로 확인된다.
     조회수·댓글수·추천수는 여전히 메시지엔 안 넣는다(문턱값 판정에만 쓴다).
     미리보기 이미지도 news의 단독 기사와 동일하게 prefer_small_media로
-    작게 띄운다(2026-08-25 사용자 요청 — 큰 사진 대신 작은 썸네일). summary는
+    작게 띄운다(2026-08-25 사용자 요청 — 큰 사진 대신 작은 썸네일). ⚠️ Bot API
+    문서: prefer_small_media는 url을 명시적으로 같이 안 주면 무시된다 —
+    wise-frontier(NewsFinal) 프로젝트가 2026-08-18에 이미 이 문제를 겪고
+    고친 기록이 있어(gemini_writer.py) 처음부터 url을 같이 넣는다. summary는
     summarize_and_check()가 뽑은 1문장 요약(2026-08-25 추가 — 텍스트/영상 위주
     글은 미리보기 카드가 비어서 요약이 필요하다는 지적) — 없으면(크롤링/Gemini
     실패, 영상·이미지 위주 글) 그냥 생략한다."""
@@ -619,7 +622,7 @@ def send_telegram(source: dict, title: str, url: str, summary: str = "") -> dict
         "chat_id": CHAT_ID,
         "text": msg,
         "parse_mode": "HTML",
-        "link_preview_options": json.dumps({"prefer_small_media": True}),
+        "link_preview_options": json.dumps({"prefer_small_media": True, "url": url}),
     }
     # fetch_news.py의 send_telegram과 동일한 429 재시도 로직 — 텔레그램 플러드
     # 컨트롤이 API 응답과 실제 발송을 분리 처리하는 문제가 여기도 똑같이 적용될
