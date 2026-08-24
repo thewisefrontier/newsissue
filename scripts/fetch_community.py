@@ -51,11 +51,15 @@ fetch_news.py(뉴스 RSS)와는 소스 종류·판정 방식이 완전히 달라
 소스 2(문턱값 소스)는 문턱값 미만인 글을 발송만 안 할 뿐 guid를 기록하지 않으므로,
 나중에 추천·조회가 늘어 문턱값을 넘으면 그때 다시 후보로 잡혀 보내진다.
 
-**성적/혐오/불법 소지 필터**(2026-08-25 사용자 요청): `_is_risky_title()`이
-제목에 붙은 경고 태그(약혐, 후방주의, 19금, 몰카 등)를 걸러낸다. 개별 글은
-크롤링하지 않는 정책(위 4번)상 본문·이미지는 못 보므로 제목의 자기신고 태그에만
-의존한다 — 완벽하지 않다(태그 없이 올라온 글은 못 거른다). 걸러진 글도 guid는
-기록해 다음 실행에서 재평가하지 않는다.
+**성적/혐오/불법 소지 필터**(2026-08-25 사용자 요청, 2단계): 1차로
+`_is_risky_title()`이 제목에 붙은 경고 태그(약혐, 후방주의, 19금, 몰카 등)를
+공짜로 즉시 거른다. 여기서 안 걸린 글 중 진짜로 보낼 후보(문턱값까지 통과한
+것)만 2차로 `is_risky_by_gemini()`가 fetch_news.py와 같은 Gemini 키로 문맥까지
+봐서 한 번 더 판정한다 — 태그 없이 올라온 글도 잡을 수 있지만, 개별 글은
+크롤링하지 않는 정책(위 4번)상 제목만 보고 판단하므로 이것도 완벽하지 않다.
+Gemini 호출이 실패해도(쿼터 소진 등) fetch_news.py의 요약 실패 처리와 동일하게
+막지 않고 통과시킨다 — 이 검사 하나 때문에 커뮤니티 발송 전체가 멈추면 안 된다.
+걸러진 글도 guid는 기록해 다음 실행에서 재평가하지 않는다.
 
 실행: python scripts/fetch_community.py
 """
@@ -109,6 +113,15 @@ TELEGRAM_MAX_RETRIES = 3
 # 재수집 방지 목적으로 충분하다.
 RETENTION_HOURS = 72
 
+# fetch_news.py와 같은 GEMINI_API_KEY(_2)를 그대로 쓴다(2026-08-25) — 같은 구글
+# 계정 쿼터를 공유하므로 news 요약과 경합할 수 있지만, 별도 키를 새로 발급받는
+# 것보다 지금은 이게 더 간단하다. 나중에 쿼터가 부족해지면 그때 키를 분리할 것.
+GEMINI_API_KEYS = [k for k in [os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_2")] if k]
+# 제목 하나 보고 예/아니오만 판정하면 되는 가벼운 작업이라 lite 모델만 쓴다
+# (fetch_news.py의 GEMINI_MODELS_LITE와 동일한 순서).
+GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+GEMINI_TIMEOUT_SEC = 10
+
 
 def _strip_tags(fragment: str) -> str:
     """태그 제거 + 엔티티 해제 + 공백 정규화. fetch_news.py의 crawl_article_text와
@@ -142,6 +155,57 @@ _RISKY_TITLE_RE = re.compile("|".join(re.escape(w) for w in _RISKY_TITLE_KEYWORD
 
 def _is_risky_title(title: str) -> bool:
     return bool(_RISKY_TITLE_RE.search(title))
+
+
+def _looks_like_yes(text: str) -> bool:
+    return text.strip().startswith(("예", "Yes", "yes", "YES"))
+
+
+def is_risky_by_gemini(title: str) -> bool:
+    """제목만 보고 성적/혐오/불법 소지가 있는지 Gemini에 한 번 더 물어본다
+    (2026-08-25 사용자 요청 — 태그 없는 글도 문맥으로 잡아내려고 키워드 필터의
+    보조로 추가). 발송 직전(문턱값까지 통과한 후보)에만 호출해 쿼터를 아낀다.
+    fetch_news.py의 요약 실패 처리와 동일하게 실패 시 무조건 False(통과)로
+    처리한다 — 이 검사가 죽었다고 커뮤니티 발송 전체가 멈추면 안 된다."""
+    if not GEMINI_API_KEYS:
+        return False
+
+    prompt = (
+        f"다음은 한국 커뮤니티 게시판 글 제목이다. 본문은 볼 수 없고 제목만 안다.\n\n"
+        f"제목: \"{title}\"\n\n"
+        "이 제목이 성적으로 노골적인 내용, 심한 혐오·잔인한 내용, 몰카·도촬 등 "
+        "불법 촬영물을 암시하는가? 단순히 정치적으로 민감하거나 논쟁적인 주제라는 "
+        "이유만으로는 '예'라고 하지 마라. 애매하면 '아니오'라고 해라(과잉 차단 "
+        "방지). 반드시 '예' 또는 '아니오' 한 단어만 출력해라."
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 2048},
+    }
+    for model in GEMINI_MODELS:
+        for key in GEMINI_API_KEYS:
+            try:
+                res = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    params={"key": key},
+                    json=payload,
+                    timeout=GEMINI_TIMEOUT_SEC,
+                )
+                if res.status_code != 200:
+                    continue
+                candidates = res.json().get("candidates") or []
+                if not candidates:
+                    continue
+                cand = candidates[0]
+                if cand.get("finishReason", "") not in ("STOP", ""):
+                    continue
+                parts = cand.get("content", {}).get("parts") or []
+                text = "".join(p.get("text", "") for p in parts).strip()
+                if text:
+                    return _looks_like_yes(text)
+            except Exception:
+                continue
+    return False
 
 
 # =========================
@@ -578,6 +642,14 @@ def run():
             if min_recommend is not None and (recommend is None or recommend < min_recommend):
                 continue
             if min_views is not None and (views is None or views < min_views):
+                continue
+
+            # 여기까지 온 건 진짜로 보낼 후보뿐이다 — Gemini 호출을 발송 직전으로
+            # 미뤄서 문턱값 미달로 어차피 안 보낼 글에는 쿼터를 안 쓴다.
+            if is_risky_by_gemini(title):
+                new_entries.append({"guid": guid, "source": source["id"], "sent_at": now_kst().isoformat()})
+                sent_guids.add(guid)
+                print(f"  🚫 Gemini 필터링: {title[:50]}")
                 continue
 
             res = send_telegram(source, title, url)
