@@ -21,9 +21,12 @@ fetch_news.py(뉴스 RSS)와는 소스 종류·판정 방식이 완전히 달라
    전부를 보낸다(소스 1). 클리앙 모두의공원·인벤 오픈이슈·뽐뿌 자유게시판처럼
    전체 최신글 목록만 있고 베스트 필터가 없는 곳은(소스 2) 대신 직접 문턱값
    (추천수 또는 조회수)을 넘는 새 글만 보낸다 — 아래 "소스 2" 항목 참고.
-4) 목록 페이지만 요청한다 — 개별 글 페이지는 절대 크롤링하지 않는다(링크로만
-   노출). 요약도 만들지 않는다 — 커뮤니티 글은 뉴스와 달리 본문 검증이 중요하지
-   않고, 크롤링 범위를 목록에만 묶어두는 게 예의에도 맞다.
+4) (2026-08-25까지의 방침) 목록 페이지만 요청하고 개별 글은 크롤링하지 않았다.
+   이후 사용자 지적으로 뒤집혔다 — "글만 있거나 영상으로 된 건 텔레그램 자동
+   미리보기가 비어 있다"(og:image/description이 없는 글은 미리보기 카드가
+   텅 빔). 그래서 지금은 발송 직전(문턱값까지 통과한 진짜 후보)에 한해서만
+   개별 글을 크롤링해 요약을 붙인다 — 아래 "본문 요약과 콘텐츠 필터" 항목 참고.
+   목록 자체를 훑는 단계(파서)는 여전히 목록 페이지만 본다.
 
 **소스 1(네이티브 "베스트" 게시판, 문턱값 없이 새 글 전부 발송) — 4곳**:
 - 루리웹 베스트(`/best/all`) — robots.txt에 걸리는 쿼리 패턴(`orderby=` 등) 없이
@@ -47,19 +50,23 @@ fetch_news.py(뉴스 RSS)와는 소스 종류·판정 방식이 완전히 달라
 **첫 실행 부트스트랩**: 상태 파일이 비어 있는 첫 실행에 그 시점 베스트 목록
 전체를 "새 글"로 보면 한 번에 수십 건이 쏟아진다. 그래서 소스별로 이번이 첫
 수집이면(상태 파일에 해당 소스 기록이 전무하면) 발송하지 않고 현재 목록을
-"이미 본 것"으로만 기록한다 — 다음 실행부터 진짜 신규 글만 실시간으로 나간다.
+"이미 본 것"으로만 기록한다 — 다음 실행부터 진짜 신규 글ولمنبيا실시간으로 나간다.
 소스 2(문턱값 소스)는 문턱값 미만인 글을 발송만 안 할 뿐 guid를 기록하지 않으므로,
 나중에 추천·조회가 늘어 문턱값을 넘으면 그때 다시 후보로 잡혀 보내진다.
 
-**성적/혐오/불법 소지 필터**(2026-08-25 사용자 요청, 2단계): 1차로
-`_is_risky_title()`이 제목에 붙은 경고 태그(약혐, 후방주의, 19금, 몰카 등)를
-공짜로 즉시 거른다. 여기서 안 걸린 글 중 진짜로 보낼 후보(문턱값까지 통과한
-것)만 2차로 `is_risky_by_gemini()`가 fetch_news.py와 같은 Gemini 키로 문맥까지
-봐서 한 번 더 판정한다 — 태그 없이 올라온 글도 잡을 수 있지만, 개별 글은
-크롤링하지 않는 정책(위 4번)상 제목만 보고 판단하므로 이것도 완벽하지 않다.
-Gemini 호출이 실패해도(쿼터 소진 등) fetch_news.py의 요약 실패 처리와 동일하게
-막지 않고 통과시킨다 — 이 검사 하나 때문에 커뮤니티 발송 전체가 멈추면 안 된다.
-걸러진 글도 guid는 기록해 다음 실행에서 재평가하지 않는다.
+**본문 요약과 콘텐츠 필터**(2026-08-25 사용자 요청, 2단계):
+1차로 `_is_risky_title()`이 제목에 붙은 경고 태그(약혐, 후방주의, 19금, 몰카
+등)를 공짜로 즉시 거른다 — 이건 모든 후보에 적용된다.
+2차는 진짜로 보낼 후보(문턱값까지 통과한 것)에만 적용된다: `crawl_post_text()`로
+개별 글 페이지 본문을 가져오고(실패하면 빈 문자열), `summarize_and_check()`가
+fetch_news.py와 같은 Gemini 키로 "위험 여부"와 "1문장 요약"을 한 번의 호출로
+같이 받는다 — 예전엔 위험판정만 제목으로 따로 불렀는데, 이제 같은 호출에 본문을
+실어 보내 위험판정 정확도도 올리고 쿼터도 아낀다. 크롤링·Gemini가 실패해도
+fetch_news.py의 요약 실패 처리와 동일하게 (요약 없음, 위험 아님)으로 fail-open —
+이 검사 하나 때문에 커뮤니티 발송 전체가 멈추면 안 된다. 걸러진 글도 guid는
+기록해 다음 실행에서 재평가하지 않는다. 영상·이미지 위주라 요약할 텍스트가
+없는 글은 요약이 빈 채로 발송된다(텔레그램 미리보기만으로 판단하게 됨) —
+이것도 완벽한 해결책은 아니다.
 
 실행: python scripts/fetch_community.py
 """
@@ -117,10 +124,13 @@ RETENTION_HOURS = 72
 # 계정 쿼터를 공유하므로 news 요약과 경합할 수 있지만, 별도 키를 새로 발급받는
 # 것보다 지금은 이게 더 간단하다. 나중에 쿼터가 부족해지면 그때 키를 분리할 것.
 GEMINI_API_KEYS = [k for k in [os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_2")] if k]
-# 제목 하나 보고 예/아니오만 판정하면 되는 가벼운 작업이라 lite 모델만 쓴다
+# 위험판정+1문장 요약을 한 번에 받는 가벼운 작업이라 lite 모델만 쓴다
 # (fetch_news.py의 GEMINI_MODELS_LITE와 동일한 순서).
 GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 GEMINI_TIMEOUT_SEC = 10
+
+CRAWL_TIMEOUT_SEC = 8
+CRAWL_MAX_CHARS = 4000  # LLM에 넘길 원문 상한(fetch_news.py CRAWL_MAX_CHARS와 동일)
 
 
 def _strip_tags(fragment: str) -> str:
@@ -138,12 +148,12 @@ def _to_int(text: str) -> int | None:
     return int(digits) if digits else None
 
 
-# 성적/혐오/불법 소지가 있는 글은 거른다(2026-08-25 사용자 요청). 목록 페이지만
-# 보고 개별 글은 절대 안 열어보는 정책(위 4번)상 본문·이미지는 볼 수 없어, 제목
-# 텍스트만으로 판단할 수 있는 신호만 쓴다 — 한국 커뮤니티는 관례적으로 이런 글에
-# 작성자가 스스로 경고 태그를 붙인다(약혐, 후방주의 등)는 점을 이용한다. 완벽한
-# 필터는 아니다(제목에 신호가 없는 글은 못 거른다) — 놓치는 게 있으면 이 목록에
-# 키워드를 추가할 것.
+# 성적/혐오/불법 소지가 있는 글은 거른다(2026-08-25 사용자 요청). 이건 1차
+# 필터라 모든 후보(문턱값 통과 여부와 무관)에 적용되고, 본문 크롤링 전에 제목
+# 텍스트만으로 판단할 수 있는 신호로 즉시 걸러낸다 — 한국 커뮤니티는 관례적으로
+# 이런 글에 작성자가 스스로 경고 태그를 붙인다(약혐, 후방주의 등)는 점을
+# 이용한다. 완벽한 필터는 아니다(제목에 신호가 없는 글은 못 거른다) — 2차로
+# summarize_and_check()가 본문까지 보고 한 번 더 거른다(발송 직전 후보에만).
 _RISKY_TITLE_KEYWORDS = [
     "약혐", "혐주의", "혐오주의", "고어주의",
     "19금", "19禁", "후방주의", "노출주의",
@@ -157,30 +167,70 @@ def _is_risky_title(title: str) -> bool:
     return bool(_RISKY_TITLE_RE.search(title))
 
 
-def _looks_like_yes(text: str) -> bool:
-    return text.strip().startswith(("예", "Yes", "yes", "YES"))
+def crawl_post_text(url: str) -> str:
+    """개별 글 페이지에서 본문 후보 텍스트를 긁어온다. fetch_news.py의
+    crawl_article_text와 완전히 같은 전략(정교한 스코핑 대신 nav/header/footer/
+    script류만 걷어내고 통째로 Gemini에 넘김) — 게시판마다 마크업이 다 달라
+    정교하게 자르려 하면 오히려 엉뚱한 내용이 잡힌다는 게 뉴스 쪽에서 이미 실측
+    확인된 교훈이라 그대로 재사용한다. 우리 정직한 커스텀 UA를 그대로 쓴다(목록
+    fetch와 동일 — 개별 글이라고 브라우저를 사칭하지 않는다). 실패하면 빈
+    문자열(발송 자체는 계속 진행, 요약 없이 나감)."""
+    try:
+        res = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=CRAWL_TIMEOUT_SEC)
+        if res.status_code != 200:
+            return ""
+        page = res.text
+        for tag in ("script", "style", "nav", "header", "footer", "aside", "form", "noscript"):
+            page = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", "", page, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", page)
+        text = html.unescape(text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:CRAWL_MAX_CHARS]
+    except Exception:
+        return ""
 
 
-def is_risky_by_gemini(title: str) -> bool:
-    """제목만 보고 성적/혐오/불법 소지가 있는지 Gemini에 한 번 더 물어본다
-    (2026-08-25 사용자 요청 — 태그 없는 글도 문맥으로 잡아내려고 키워드 필터의
-    보조로 추가). 발송 직전(문턱값까지 통과한 후보)에만 호출해 쿼터를 아낀다.
-    fetch_news.py의 요약 실패 처리와 동일하게 실패 시 무조건 False(통과)로
-    처리한다 — 이 검사가 죽었다고 커뮤니티 발송 전체가 멈추면 안 된다."""
+def _parse_gemini_verdict(text: str) -> tuple[str, bool]:
+    """"위험:예/아니오" 줄과 요약 줄을 파싱한다. "위험:" 줄을 못 찾으면
+    안전하게 (요약 없음, 위험 아님)으로 처리 — 파싱 실패를 위험 판정 실패와
+    똑같이 fail-open 시킨다."""
+    lines = [ln.strip() for ln in text.strip().split("\n") if ln.strip()]
+    for i, line in enumerate(lines):
+        if line.startswith("위험"):
+            risky = "예" in line
+            summary = lines[i + 1] if not risky and i + 1 < len(lines) else ""
+            return summary, risky
+    return "", False
+
+
+def summarize_and_check(title: str, raw_text: str) -> tuple[str, bool]:
+    """본문(크롤링 성공 시) 또는 제목만으로 위험 판정과 1문장 요약을 한 번의
+    Gemini 호출로 같이 받는다(2026-08-25 사용자 요청 — "글만 있거나 영상으로
+    된 건 미리보기가 비어 있다"는 지적으로 본문 요약을 추가하면서, 기존에
+    제목만 보던 위험판정도 같은 호출에 실어 정확도를 올리고 쿼터를 아꼈다).
+    발송 직전(문턱값까지 통과한 후보)에만 호출한다. fetch_news.py의 요약 실패
+    처리와 동일하게 실패 시 (요약 없음, 위험 아님)으로 fail-open — 이 검사
+    하나 때문에 커뮤니티 발송 전체가 멈추면 안 된다."""
     if not GEMINI_API_KEYS:
-        return False
+        return "", False
 
+    body_block = f"\n\n[본문 텍스트]\n{raw_text}" if raw_text else "\n\n(본문을 가져오지 못했다 — 제목만으로 판단해라)"
     prompt = (
-        f"다음은 한국 커뮤니티 게시판 글 제목이다. 본문은 볼 수 없고 제목만 안다.\n\n"
-        f"제목: \"{title}\"\n\n"
-        "이 제목이 성적으로 노골적인 내용, 심한 혐오·잔인한 내용, 몰카·도촬 등 "
-        "불법 촬영물을 암시하는가? 단순히 정치적으로 민감하거나 논쟁적인 주제라는 "
-        "이유만으로는 '예'라고 하지 마라. 애매하면 '아니오'라고 해라(과잉 차단 "
-        "방지). 반드시 '예' 또는 '아니오' 한 단어만 출력해라."
+        f"다음은 한국 커뮤니티 게시판 글이다.\n\n"
+        f"제목: \"{title}\"{body_block}\n\n"
+        "본문에는 광고, 댓글, 다른 글 목록 같은 잡음이 섞여 있을 수 있다. 다음 두 "
+        "줄을 정확히 이 순서로 출력해라. 다른 말은 절대 덧붙이지 마라.\n"
+        "1번째 줄: 이 글이 성적으로 노골적인 내용, 심한 혐오·잔인한 내용, 몰카·도촬 "
+        "등 불법 촬영물을 암시하면 \"위험:예\", 아니면 \"위험:아니오\"라고 써라. "
+        "단순히 정치적으로 민감하거나 논쟁적인 주제라는 이유만으로는 \"위험:예\"라고 "
+        "하지 마라. 애매하면 \"위험:아니오\"라고 해라(과잉 차단 방지).\n"
+        "2번째 줄: 본문 핵심을 1문장, 60자 안팎의 한국어로 해라체로 요약해라. 본문에서 "
+        "확인되지 않는 내용은 추가하지 마라. 본문이 없거나(영상·이미지 위주 글) 요약할 "
+        "내용이 없으면, 또는 1번째 줄이 \"위험:예\"면 이 줄은 빈 줄로 둬라."
     )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 2048},
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
     }
     for model in GEMINI_MODELS:
         for key in GEMINI_API_KEYS:
@@ -202,10 +252,10 @@ def is_risky_by_gemini(title: str) -> bool:
                 parts = cand.get("content", {}).get("parts") or []
                 text = "".join(p.get("text", "") for p in parts).strip()
                 if text:
-                    return _looks_like_yes(text)
+                    return _parse_gemini_verdict(text)
             except Exception:
                 continue
-    return False
+    return "", False
 
 
 # =========================
@@ -546,21 +596,25 @@ def prune_state(state: dict):
 # TELEGRAM
 # =========================
 
-def send_telegram(source: dict, title: str, url: str) -> dict:
+def send_telegram(source: dict, title: str, url: str, summary: str = "") -> dict:
     """fetch_news.py의 메시지 형식과 통일한다(사용자 피드백, 2026-08-25):
     앞에 "[루리웹 베스트]" 같은 소스명 대괄호를 붙이지 않고, news와 똑같이
     footer의 "출처" 링크 하나로만 소스를 표시한다 — 소스 구분은 이모지(source
     마다 다름)로 충분하고, 어느 글인지는 미리보기 카드로 바로 확인된다.
     조회수·댓글수·추천수는 여전히 메시지엔 안 넣는다(문턱값 판정에만 쓴다).
     미리보기 이미지도 news의 단독 기사와 동일하게 prefer_small_media로
-    작게 띄운다(2026-08-25 사용자 요청 — 큰 사진 대신 작은 썸네일)."""
+    작게 띄운다(2026-08-25 사용자 요청 — 큰 사진 대신 작은 썸네일). summary는
+    summarize_and_check()가 뽑은 1문장 요약(2026-08-25 추가 — 텍스트/영상 위주
+    글은 미리보기 카드가 비어서 요약이 필요하다는 지적) — 없으면(크롤링/Gemini
+    실패, 영상·이미지 위주 글) 그냥 생략한다."""
     title_safe = html.escape(title)
     title_linked = f'<a href="{url}">{title_safe}</a>'
+    summary_block = f"\n\n{html.escape(summary)}" if summary else ""
     footer_line = (
         f"\n\n📎 <a href=\"{url}\">출처</a> | "
         f"<a href=\"{CHANNEL_URL}\">{CHANNEL_TAG}</a>"
     )
-    msg = f"{source['emoji']} {title_linked}{footer_line}"
+    msg = f"{source['emoji']} {title_linked}{summary_block}{footer_line}"
     data = {
         "chat_id": CHAT_ID,
         "text": msg,
@@ -644,15 +698,17 @@ def run():
             if min_views is not None and (views is None or views < min_views):
                 continue
 
-            # 여기까지 온 건 진짜로 보낼 후보뿐이다 — Gemini 호출을 발송 직전으로
-            # 미뤄서 문턱값 미달로 어차피 안 보낼 글에는 쿼터를 안 쓴다.
-            if is_risky_by_gemini(title):
+            # 여기까지 온 건 진짜로 보낼 후보뿐이다 — 크롤링·Gemini 호출을 발송
+            # 직전으로 미뤄서 문턱값 미달로 어차피 안 보낼 글에는 요청을 안 보낸다.
+            raw_text = crawl_post_text(url)
+            summary, risky = summarize_and_check(title, raw_text)
+            if risky:
                 new_entries.append({"guid": guid, "source": source["id"], "sent_at": now_kst().isoformat()})
                 sent_guids.add(guid)
                 print(f"  🚫 Gemini 필터링: {title[:50]}")
                 continue
 
-            res = send_telegram(source, title, url)
+            res = send_telegram(source, title, url, summary)
             if res.get("ok"):
                 sent_count += 1
                 new_entries.append({"guid": guid, "source": source["id"], "sent_at": now_kst().isoformat()})
