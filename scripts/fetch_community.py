@@ -458,19 +458,25 @@ def prune_state(state: dict):
 # =========================
 
 def send_telegram(source: dict, title: str, url: str) -> dict:
-    """조회수·댓글수·추천수는 문턱값 판정(run())에만 쓰고 메시지엔 안 넣는다 —
-    사용자 피드백(2026-08-25): 숫자 나열보다 텔레그램 자동 링크 미리보기(썸네일+
-    본문 일부)가 실제로 뭔 글인지 파악하는 데 더 유용하다. 그래서
-    link_preview_options로 미리보기를 끄지 않는다 — 메시지에 있는 첫 링크
-    (제목 링크, 곧 원문)를 텔레그램이 자동으로 카드로 붙여준다."""
+    """fetch_news.py의 메시지 형식과 통일한다(사용자 피드백, 2026-08-25):
+    앞에 "[루리웹 베스트]" 같은 소스명 대괄호를 붙이지 않고, news와 똑같이
+    footer의 "출처" 링크 하나로만 소스를 표시한다 — 소스 구분은 이모지(source
+    마다 다름)로 충분하고, 어느 글인지는 미리보기 카드로 바로 확인된다.
+    조회수·댓글수·추천수는 여전히 메시지엔 안 넣는다(문턱값 판정에만 쓴다).
+    미리보기 이미지도 news의 단독 기사와 동일하게 prefer_small_media로
+    작게 띄운다(2026-08-25 사용자 요청 — 큰 사진 대신 작은 썸네일)."""
     title_safe = html.escape(title)
     title_linked = f'<a href="{url}">{title_safe}</a>'
-    footer_line = f"\n\n<a href=\"{CHANNEL_URL}\">{CHANNEL_TAG}</a>"
-    msg = f"{source['emoji']} [{source['name']}] {title_linked}{footer_line}"
+    footer_line = (
+        f"\n\n📎 <a href=\"{url}\">출처</a> | "
+        f"<a href=\"{CHANNEL_URL}\">{CHANNEL_TAG}</a>"
+    )
+    msg = f"{source['emoji']} {title_linked}{footer_line}"
     data = {
         "chat_id": CHAT_ID,
         "text": msg,
         "parse_mode": "HTML",
+        "link_preview_options": json.dumps({"prefer_small_media": True}),
     }
     # fetch_news.py의 send_telegram과 동일한 429 재시도 로직 — 텔레그램 플러드
     # 컨트롤이 API 응답과 실제 발송을 분리 처리하는 문제가 여기도 똑같이 적용될
