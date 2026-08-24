@@ -257,18 +257,20 @@ def test_should_bypass_title_dup_on_different_link():
     확인). JTBC가 "위너즈 코인" 수사 지연 단독을 낸 뒤 같은 소재를 다룬 후속
     단독("깡통 코인" 응징하던 유튜버가 실은 사기 피소)을 냈는데, 제목이 겹쳐
     1단계에서 스킵될 뻔한 이런 경우를 실제 URL로 구제한다. matched_link를 모르는
-    경우(과거 링크 정보 없음)는 판단 근거가 없어 기존처럼 스킵을 유지해야 하고,
-    속보는 2보/3보 관행 때문에 이 예외를 적용하지 않는다(사용자도 별도 검토
-    필요하다고 확인)."""
+    경우(과거 링크 정보 없음)는 판단 근거가 없어 기존처럼 스킵을 유지해야 한다.
+
+    처음엔 속보를 빼고 단독/종합에만 적용했다 — 2보/3보가 같은 URL을 그대로
+    갱신할까 우려했기 때문. 그런데 한국 언론사는 같은 URL 갱신을 오타 수정에만
+    쓰고, 2보/3보처럼 사실이 추가되는 갱신은 새 URL로 낸다는 사용자 확인을 받아
+    카테고리 구분 없이 전체에 적용하도록 바꿨다(그래서 이 함수는 이제 category를
+    받지 않는다)."""
     return (
-        check("단독, 링크 다름 → 스킵 취소(후속 기사)",
-              _should_bypass_title_dup("단독", "https://jtbc.co.kr/a1", "https://jtbc.co.kr/a2"))
-        and check("단독, 링크 같음 → 스킵 유지(진짜 중복)",
-                  not _should_bypass_title_dup("단독", "https://jtbc.co.kr/a1", "https://jtbc.co.kr/a1"))
-        and check("속보는 예외 미적용(2보/3보 관행, 별도 검토 필요)",
-                  not _should_bypass_title_dup("속보", "https://a.com/1", "https://a.com/2"))
+        check("링크 다름 → 스킵 취소(후속 기사)",
+              _should_bypass_title_dup("https://jtbc.co.kr/a1", "https://jtbc.co.kr/a2"))
+        and check("링크 같음 → 스킵 유지(진짜 중복)",
+                  not _should_bypass_title_dup("https://jtbc.co.kr/a1", "https://jtbc.co.kr/a1"))
         and check("matched_link 모름 → 판단 근거 없어 스킵 유지",
-                  not _should_bypass_title_dup("단독", "", "https://jtbc.co.kr/a2"))
+                  not _should_bypass_title_dup("", "https://jtbc.co.kr/a2"))
     )
 
 
