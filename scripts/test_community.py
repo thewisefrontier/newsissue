@@ -15,7 +15,7 @@ import sys
 import fetch_community as fc
 from fetch_community import (
     parse_ruliweb, parse_theqoo, parse_dcinside, parse_clien, parse_inven, parse_ppomppu,
-    _is_risky_title, _looks_like_yes, is_risky_by_gemini,
+    _is_risky_title, _parse_gemini_verdict, summarize_and_check,
 )
 
 
@@ -248,16 +248,23 @@ def test_is_risky_title():
     )
 
 
-def test_looks_like_yes():
+def test_parse_gemini_verdict():
+    """"위험:" 줄을 찾아 위험 여부와 그다음 줄의 요약을 뽑는지, 위험인 경우
+    요약을 버리는지, "위험:" 줄 자체를 못 찾으면 안전하게 (요약 없음, 위험
+    아님)으로 fail-open 하는지 확인한다."""
+    safe_summary, safe_risky = _parse_gemini_verdict("위험:아니오\n동네 카페 후기를 남긴 글이다.")
+    risky_summary, risky_risky = _parse_gemini_verdict("위험:예\n(요약 생략됨)")
+    no_verdict_summary, no_verdict_risky = _parse_gemini_verdict("그냥 아무 말이나 한 응답")
     return (
-        check("'예'로 시작하면 True", _looks_like_yes("예"))
-        and check("'예.'처럼 문장부호 붙어도 True", _looks_like_yes("예."))
-        and check("'아니오'는 False", not _looks_like_yes("아니오"))
-        and check("빈 문자열은 False", not _looks_like_yes(""))
+        check("정상 응답: 위험 아님", safe_risky is False)
+        and check("정상 응답: 요약 추출", safe_summary == "동네 카페 후기를 남긴 글이다.", f"got {safe_summary!r}")
+        and check("위험 응답: risky=True", risky_risky is True)
+        and check("위험 응답: 요약은 버림", risky_summary == "", f"got {risky_summary!r}")
+        and check("'위험:' 줄 없으면 fail-open", no_verdict_risky is False and no_verdict_summary == "")
     )
 
 
-def test_is_risky_by_gemini_fails_open():
+def test_summarize_and_check_fails_open():
     """이 검사가 죽어도(키 없음, 네트워크 실패) 발송 전체를 막지 않고 통과시켜야
     한다 — fetch_news.py의 요약 실패 처리와 동일한 방침. 실제 API는 호출하지
     않는다(수동 실측은 이미 확인함, 여기서는 폴백 경로만 확정적으로 검증)."""
@@ -265,7 +272,7 @@ def test_is_risky_by_gemini_fails_open():
     original_post = fc.requests.post
     try:
         fc.GEMINI_API_KEYS = []
-        no_keys_result = is_risky_by_gemini("아무 제목")
+        no_keys_summary, no_keys_risky = summarize_and_check("아무 제목", "")
 
         fc.GEMINI_API_KEYS = ["dummy-key"]
 
@@ -273,14 +280,16 @@ def test_is_risky_by_gemini_fails_open():
             raise ConnectionError("네트워크 실패 시뮬레이션")
 
         fc.requests.post = _raise
-        network_fail_result = is_risky_by_gemini("아무 제목")
+        fail_summary, fail_risky = summarize_and_check("아무 제목", "본문 텍스트")
     finally:
         fc.GEMINI_API_KEYS = original_keys
         fc.requests.post = original_post
 
     return (
-        check("키 없으면 False(통과)", no_keys_result is False)
-        and check("네트워크 실패해도 False(통과)", network_fail_result is False)
+        check("키 없으면 위험 아님", no_keys_risky is False)
+        and check("키 없으면 요약도 없음", no_keys_summary == "")
+        and check("네트워크 실패해도 위험 아님", fail_risky is False)
+        and check("네트워크 실패해도 요약 없음", fail_summary == "")
     )
 
 
@@ -293,8 +302,8 @@ def main():
         test_parse_inven(),
         test_parse_ppomppu(),
         test_is_risky_title(),
-        test_looks_like_yes(),
-        test_is_risky_by_gemini_fails_open(),
+        test_parse_gemini_verdict(),
+        test_summarize_and_check_fails_open(),
     ]
     print()
     if all(results):
