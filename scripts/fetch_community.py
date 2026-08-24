@@ -112,7 +112,14 @@ USER_AGENT = "newsissue-community-bot/1.0 (+https://github.com/thewisefrontier/n
 REQUEST_TIMEOUT_SEC = 10
 # 소스 사이 예의상 지연 — 순차 요청, 동시 요청 안 함.
 SOURCE_DELAY_SEC = 1.5
-SEND_INTERVAL_SEC = 1.5
+# 1.5초였다가 3초로 늘렸다(2026-08-25 사용자 요청, 실험) — 클리앙처럼 링크 있는
+# 메시지를 짧은 간격으로 연달아 보내면 텔레그램 자체 미리보기 생성이 일부
+# 빠지는 현상을 사용자가 실제로 목격했다. 우리 쪽(og:description은 전부 있고
+# 클리앙이 TelegramBot UA를 차단하지도 않음을 실측 확인)이 원인이 아니라
+# 텔레그램의 비동기 미리보기 생성이 연속 발송을 못 따라가는 것으로 의심되어,
+# 발송 간격을 늘려 개선되는지 지켜보는 중이다 — 아직 확정된 원인/해결책은
+# 아니다. 개선이 안 보이면 원래대로 되돌릴 것.
+SEND_INTERVAL_SEC = 3.0
 TELEGRAM_MAX_RETRIES = 3
 
 # 상태 파일이 무한정 커지지 않도록 오래된 guid는 정리한다. 커뮤니티 베스트글은
