@@ -250,6 +250,29 @@ def test_link_exact_match():
     )
 
 
+def test_title_only_requires_both_scores():
+    """실사고(2026-08-24): 미 재무부의 이란 제재 발표를 다룬 속보 3건("송금 허가
+    중단"/"2차제재 대상"/"60곳 제재 명단" — 전부 다른 사실)이 Gemini 요약 실패로
+    제목만 비교됐는데, 실제 로그에서 단어 오버랩은 28.6%/14.3%로 정확히 "다른
+    기사"라고 판단했지만 문자 3-gram 오버랩은 37.5%/29.2%로 임계값(25%)을 넘어
+    "둘 중 하나만 넘어도 중복"(OR) 규칙 때문에 셋 다 서로 중복 처리돼 발송
+    0건이 됐다. 셋 다 "美재무부 ... 이란 ..."이라는 짧고 상투적인 문구를 공유해
+    문자 오버랩만 가짜로 올라간 것 — 요약(80자↑ 문장)과 달리 제목(20~30자)은
+    상투구 비중이 커서 문자 오버랩 단독으로는 못 믿는다. title_only=True일 때는
+    단어·문자가 동시에 임계값을 넘어야 중복 판정하도록 고쳤다."""
+    a = '[속보] 美재무부 "이란 송금 허용했던 일반 허가 효력 중단"'
+    b = '[속보] 美재무부 "이란 핵·미사일·사이버·석유 관련 약 60곳 제재"'
+    recent = [{"title": b, "category": "속보"}]
+    is_dup_or, wo, co, _ = is_summary_duplicate(a, "속보", recent, title_only=False)
+    is_dup_and, wo2, co2, _ = is_summary_duplicate(a, "속보", recent, title_only=True)
+    return (
+        check("버그 재현: title_only=False(OR)면 문자 오버랩 단독으로 중복 오판",
+              is_dup_or, f"word={wo} char={co}")
+        and check("수정: title_only=True(AND)면 단어 오버랩이 임계값 미달이라 중복 아님",
+                  not is_dup_and, f"word={wo2} char={co2}")
+    )
+
+
 def test_refusal_marks():
     """실사고(2026-08-18): "본문 내용이 없어 요약할 수 없다"가 그대로 발송됨.
     실사고(2026-08-19): 뉴스핌 속보 자리채움 문구("자세한 뉴스는 곧 전해질
@@ -279,6 +302,7 @@ def main():
         test_correction_mismatch_guard(),
         test_summary_borderline_detection(),
         test_link_exact_match(),
+        test_title_only_requires_both_scores(),
         test_refusal_marks(),
     ]
     print()
