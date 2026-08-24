@@ -12,7 +12,10 @@ fetch_community.py 파서 회귀 테스트.
 
 import sys
 
-from fetch_community import parse_ruliweb, parse_theqoo, parse_dcinside, parse_clien, parse_inven, parse_ppomppu
+from fetch_community import (
+    parse_ruliweb, parse_theqoo, parse_dcinside, parse_clien, parse_inven, parse_ppomppu,
+    _is_risky_title,
+)
 
 
 def check(name: str, cond: bool, detail: str = ""):
@@ -221,6 +224,29 @@ def test_parse_ppomppu():
     )
 
 
+def test_is_risky_title():
+    """경고 태그가 붙은 제목은 걸러지고, 그 태그가 우연히도 부분 포함되지 않는
+    평범한 제목은 안 걸러지는지(오탐 방지) 둘 다 확인한다."""
+    risky = [
+        "약혐) 이거 실화냐",
+        "후방주의) 여기서 보면 안 됨",
+        "19금 웹툰 추천",
+        "몰카 피해 실화라고 함",
+    ]
+    safe = [
+        "성인식이 다가온다",  # "성인" 단독은 필터 대상 아님(성인물/성인용만)
+        "부동산 정보 노출 문제",  # "노출" 단독은 필터 대상 아님(노출주의만)
+        "10년전 좇소신입 공식급여",
+        "메탈슬러그 30주년 총선거",
+    ]
+    return (
+        check("경고 태그 붙은 제목은 전부 필터링", all(_is_risky_title(t) for t in risky),
+              f"{[t for t in risky if not _is_risky_title(t)]}")
+        and check("평범한 제목은 오탐 없음", not any(_is_risky_title(t) for t in safe),
+                  f"{[t for t in safe if _is_risky_title(t)]}")
+    )
+
+
 def main():
     results = [
         test_parse_ruliweb(),
@@ -229,6 +255,7 @@ def main():
         test_parse_clien(),
         test_parse_inven(),
         test_parse_ppomppu(),
+        test_is_risky_title(),
     ]
     print()
     if all(results):
