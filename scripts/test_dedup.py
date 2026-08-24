@@ -30,6 +30,7 @@ from fetch_news import (
     SUMMARY_CHAR_TRIGRAM_OVERLAP_THRESHOLD,
     SUMMARY_BORDERLINE_MARGIN,
     _link_already_sent,
+    _should_bypass_title_dup,
 )
 
 
@@ -44,9 +45,9 @@ def test_stage1_title_same_batch():
     중앙일보와 100% 동일한 제목으로 나란히 발송됐던 문제. recent에 배치 내
     후보를 미리 넣어두고 그다음 후보가 걸리는지 확인한다."""
     recent = [{"title": "종합특검, '관저 이전 의혹' 김건희·윤한홍 기소", "category": "종합"}]
-    dup_exact, score_exact, _ = is_duplicate(
+    dup_exact, score_exact, _, _ = is_duplicate(
         "종합특검, '관저 이전 의혹' 김건희·윤한홍 기소", "종합", recent)
-    dup_diff, score_diff, _ = is_duplicate(
+    dup_diff, score_diff, _, _ = is_duplicate(
         "尹정부 관저 이전 특혜 의혹, 김건희·윤한홍 재판行", "종합", recent)
     return (
         check("완전 동일 제목 → 중복 판정", dup_exact, f"score={score_exact}")
@@ -88,9 +89,9 @@ def test_numeric_conflict_guard():
     안 된다. 단, 숫자까지 완전히 같으면(진짜 동일 기사 재수집 등) 여전히
     중복으로 잡혀야 한다."""
     recent = [{"title": "[속보] 코스피 4%대 급등…매수 사이드카 발동", "category": "속보"}]
-    dup_diff_num, score_diff, _ = is_duplicate(
+    dup_diff_num, score_diff, _, _ = is_duplicate(
         "[속보] 코스피 6%대 급등…매수 사이드카 발동", "속보", recent)
-    dup_same_num, score_same, _ = is_duplicate(
+    dup_same_num, score_same, _, _ = is_duplicate(
         "[속보] 코스피 4%대 급등…매수 사이드카 발동", "속보", recent)
     return (
         check("숫자만 다른 시황 제목 → 중복 아님", not dup_diff_num, f"score={score_diff}")
@@ -118,7 +119,7 @@ def test_market_term_alias_and_pct_only_conflict_guard():
     ok = check("같은 사이드카 사건, 용어만 다름 → 중복 판정", is_dup, f"word={wo} char={co}")
 
     kospi_recent = [{"title": "[속보] 코스피 4%대 급등…매수 사이드카 발동", "category": "속보"}]
-    dup_diff, score_diff, _ = is_duplicate(
+    dup_diff, score_diff, _, _ = is_duplicate(
         "[속보] 코스피 6%대 급등…매수 사이드카 발동", "속보", kospi_recent)
     ok = check("퍼센트 전용 가드로 바꿔도 진짜 다른 % 시황은 여전히 중복 아님",
                not dup_diff, f"score={score_diff}") and ok
@@ -250,6 +251,27 @@ def test_link_exact_match():
     )
 
 
+def test_should_bypass_title_dup_on_different_link():
+    """2026-08-24 사용자 요청: 같은 언론사·다른 주소 = 후속 기사다(추측이 아니라
+    확정 — 언론사가 별개 URL에 완전히 같은 기사를 중복 게시하는 일은 없다는 사용자
+    확인). JTBC가 "위너즈 코인" 수사 지연 단독을 낸 뒤 같은 소재를 다룬 후속
+    단독("깡통 코인" 응징하던 유튜버가 실은 사기 피소)을 냈는데, 제목이 겹쳐
+    1단계에서 스킵될 뻔한 이런 경우를 실제 URL로 구제한다. matched_link를 모르는
+    경우(과거 링크 정보 없음)는 판단 근거가 없어 기존처럼 스킵을 유지해야 하고,
+    속보는 2보/3보 관행 때문에 이 예외를 적용하지 않는다(사용자도 별도 검토
+    필요하다고 확인)."""
+    return (
+        check("단독, 링크 다름 → 스킵 취소(후속 기사)",
+              _should_bypass_title_dup("단독", "https://jtbc.co.kr/a1", "https://jtbc.co.kr/a2"))
+        and check("단독, 링크 같음 → 스킵 유지(진짜 중복)",
+                  not _should_bypass_title_dup("단독", "https://jtbc.co.kr/a1", "https://jtbc.co.kr/a1"))
+        and check("속보는 예외 미적용(2보/3보 관행, 별도 검토 필요)",
+                  not _should_bypass_title_dup("속보", "https://a.com/1", "https://a.com/2"))
+        and check("matched_link 모름 → 판단 근거 없어 스킵 유지",
+                  not _should_bypass_title_dup("단독", "", "https://jtbc.co.kr/a2"))
+    )
+
+
 def test_title_only_requires_both_scores():
     """실사고(2026-08-24): 미 재무부의 이란 제재 발표를 다룬 속보 3건("송금 허가
     중단"/"2차제재 대상"/"60곳 제재 명단" — 전부 다른 사실)이 Gemini 요약 실패로
@@ -302,6 +324,7 @@ def main():
         test_correction_mismatch_guard(),
         test_summary_borderline_detection(),
         test_link_exact_match(),
+        test_should_bypass_title_dup_on_different_link(),
         test_title_only_requires_both_scores(),
         test_refusal_marks(),
     ]
