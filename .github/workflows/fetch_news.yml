@@ -43,6 +43,18 @@ jobs:
           restore-keys: |
             state-
 
+      # 커뮤니티 베스트글 발송 이력(community_state.json)도 같은 방식으로 별도
+      # 캐시한다 — 뉴스 state.json과 완전히 분리된 파일이라(2026-08-25, fetch_community.py
+      # 참고) 캐시 키도 따로 둔다.
+      - name: community_state.json 캐시 복원
+        id: community-cache-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: data/community_state.json
+          key: community-state-${{ github.run_id }}
+          restore-keys: |
+            community-state-
+
       # cron-job.org가 10분마다 정확히 호출하지만, 재시도나 겹침으로 트리거가
       # 몰릴 가능성에 대비해 직전 캐시가 너무 최근이면 건너뛴다. 트리거가
       # schedule에서 workflow_dispatch로 바뀌었으므로 조건도 맞춰 변경(2026-08-19).
@@ -97,6 +109,16 @@ jobs:
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
 
+      - name: 커뮤니티 베스트글 수집 및 발송
+        if: steps.guard.outputs.skip != 'true'
+        # 목록 페이지 4곳만 순차 요청(크롤링·Gemini 없음)이라 뉴스보다 훨씬
+        # 빠르다 — fetch_community.py 옆 주석 참고.
+        timeout-minutes: 5
+        run: python scripts/fetch_community.py
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+
       - name: state.json 캐시 저장
         # 위 스텝이 타임아웃/실패로 중단돼도 그때까지 처리된 상태는 저장한다.
         if: steps.guard.outputs.skip != 'true' && always()
@@ -104,3 +126,10 @@ jobs:
         with:
           path: data/state.json
           key: state-${{ github.run_id }}
+
+      - name: community_state.json 캐시 저장
+        if: steps.guard.outputs.skip != 'true' && always()
+        uses: actions/cache/save@v6
+        with:
+          path: data/community_state.json
+          key: community-state-${{ github.run_id }}
