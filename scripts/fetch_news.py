@@ -15,9 +15,11 @@ scripts/fetch_news.py
         저장하지 말고 주소도 저장해서 비교하자").
       1단계 — 제목만으로 값싸게 거른다(크롤링 없음). 문구까지 거의 같은 명백한 중복만
         잡는다(DUP_SKIP_THRESHOLD, 문자 3-gram). NewsFinal auto_dedup.py 구조를
-        로컬로 이식한 것. 단, 단독/종합에서 제목이 겹쳐 스킵 후보가 되면 실제 URL을
-        먼저 확인한다 — 같은 언론사·다른 주소 = 후속 기사다(2026-08-24 사용자 요청,
-        _should_bypass_title_dup 참고).
+        로컬로 이식한 것. 단, 제목이 겹쳐 스킵 후보가 되면 실제 URL을 먼저 확인한다 —
+        같은 언론사·다른 주소는 그 자체로 다른(대개 후속) 기사다(2026-08-24 사용자
+        요청, _should_bypass_title_dup 참고). 속보의 2보/3보도 포함 — 한국 언론사는
+        같은 URL 갱신을 오타 수정에만 쓰고, 사실이 추가되는 갱신은 새 URL로 낸다는
+        사용자 확인.
       2단계 — 1단계를 통과한 후보만 본문을 크롤링·Gemini 요약한 뒤, 그 요약끼리
         비교한다(is_summary_duplicate). 제목만으로는 "같은 사건, 다른 표현"과
         "같은 사건, 다른 후속 사실"을 구분하지 못한다 — 실측(2026-08-17): 문화일보·
@@ -57,6 +59,9 @@ scripts/fetch_news.py
         언론사·다른 주소는 그 자체로 다른(대개 후속) 기사다 — 언론사가 별개 URL에
         완전히 같은 기사를 중복 게시하는 일은 없기 때문. 그런데 1단계는 제목만
         보고 스킵해 이런 후속 단독을 놓쳤다 — _should_bypass_title_dup 참고.
+        처음엔 속보를 빼고 단독/종합에만 적용했는데(2보/3보가 같은 URL을 그대로
+        갱신할까 우려), 한국 언론사는 같은 URL 갱신을 오타 수정에만 쓰고 2보/3보
+        같은 사실 추가는 새 URL로 낸다는 사용자 확인을 받아 속보도 포함시켰다.
       (Supabase/Gemini 통합 재작성 단계는 여기선 안 씀 — 우리는 자체 기사를 쓰는 게 아니라
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
 링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
@@ -553,10 +558,15 @@ def is_duplicate(title: str, category: str, recent: list):
 # 없는 가벼운 디코딩이라 스킵 대상에만 적용해도 비용 부담이 적다). 과거 매칭된
 # 기사의 링크를 알고 있고(matched_link) 실제로 다르면 스킵을 취소한다 — matched_link를
 # 모르면(과거 항목에 링크 정보가 없는 경우) 판단 근거가 없으므로 안전하게 기존
-# 스킵을 유지한다. 속보는 2보/3보 같은 별도 갱신 관행이 있어 이 예외를 적용하지
-# 않는다(사용자도 "그 로직은 더 고민이 필요하다"고 확인 — 별개 트랙으로 미룸).
-def _should_bypass_title_dup(category: str, matched_link: str, real_link: str) -> bool:
-    return category in ("단독", "종합") and bool(matched_link) and bool(real_link) and real_link != matched_link
+# 스킵을 유지한다.
+#
+# 처음엔 속보를 빼고 단독/종합에만 적용했다 — 2보/3보가 같은 URL을 그대로
+# 갱신하는 경우 이 방식으로 못 잡는다고 우려했기 때문. 그런데 사용자 확인:
+# 한국 언론사는 같은 URL을 그대로 갱신하는 게 오타·오기 수정 정도뿐이고, 2보/3보처럼
+# 사실이 추가되는 갱신은 새 URL로 발행하는 게 관행이다 — 그래서 그 우려가 실제로는
+# 해당 안 되고, 속보도 똑같이 적용하면 된다(2026-08-24 사용자 확인).
+def _should_bypass_title_dup(matched_link: str, real_link: str) -> bool:
+    return bool(matched_link) and bool(real_link) and real_link != matched_link
 
 
 def _keywords(title: str) -> set:
@@ -994,12 +1004,13 @@ def run():
                 continue  # 이미 처리한 기사(같은 기사 재수집)
 
             is_dup, score, matched, matched_link = is_duplicate(c["title"], category, recent_for_dedup)
-            if is_dup and category in ("단독", "종합") and matched_link:
+            if is_dup and matched_link:
                 # 실사고(2026-08-24 사용자 요청): 같은 언론사·다른 주소 = 후속 기사다 —
-                # 제목만 보고 스킵하기 전에 실제 URL을 확인한다. _should_bypass_title_dup
-                # 옆 주석 참고.
+                # 제목만 보고 스킵하기 전에 실제 URL을 확인한다(속보 포함 전체 카테고리
+                # — 한국 언론사는 같은 URL 갱신을 오타 수정에만 쓰고 2보/3보는 새 URL로
+                # 낸다는 사용자 확인). _should_bypass_title_dup 옆 주석 참고.
                 c["real_link"] = resolve_real_url(c["link"])
-                if _should_bypass_title_dup(category, matched_link, c["real_link"]):
+                if _should_bypass_title_dup(matched_link, c["real_link"]):
                     print(f"  🔗 제목 유사({score}%)하지만 실제 링크가 달라 후속 기사로 판단, 본문 확인으로: {c['title'][:40]}")
                     is_dup = False
             if is_dup:
