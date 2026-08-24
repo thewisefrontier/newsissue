@@ -27,6 +27,9 @@ scripts/fetch_news.py
         시황/지수 속보(코스피·코스닥 등락, 사이드카 등)는 문구가 고정 템플릿이라,
         원보도/정정보도(발견 ↔ 발견 사실 아님)는 정반대 내용인데 핵심 단어가 겹쳐
         추가 보정이 필요했다 — is_duplicate/is_summary_duplicate 옆 주석 참고.
+        요약 실패로 제목만 비교하게 되는 경우(Gemini 타임아웃/503 등, 실측상 드물지
+        않음)는 짧고 상투적인 문구(기관명 등)만으로도 문자 오버랩이 가짜로 임계값을
+        넘을 수 있어 별도 처리한다 — is_summary_duplicate의 title_only 분기 참고.
       비교 대상 시간창(DEDUP_WINDOW_HOURS_BY_CATEGORY)도 카테고리별로 다르다 —
         속보는 시황처럼 몇 분 단위로 실제 값이 바뀌는 경우가 있어 짧게(2시간),
         단독/종합은 몇 시간~하루 간격으로 재등장하는 재탕을 잡아야 해서 길게
@@ -44,6 +47,10 @@ scripts/fetch_news.py
         10분 간격으로 4번 연속 채널에 올라간 사고도 있었다 — send_telegram 옆
         주석 참고(텔레그램 429 응답을 재시도 없이 실패 처리해서 state에 기록이 안
         되고, 그래서 다음 실행마다 "아직 안 보낸 기사"로 오인해 재처리했다).
+      실사고(2026-08-24, 심각): 미 재무부의 이란 제재 발표를 다룬 속보 3건(전부
+        다른 사실)이 요약 실패로 제목만 비교됐는데, 셋 다 짧고 상투적인 문구를
+        공유해 문자 3-gram 오버랩만 가짜로 임계값을 넘어 서로를 중복 처리, 발송
+        0건이 됐다 — is_summary_duplicate의 title_only 분기 참고.
       (Supabase/Gemini 통합 재작성 단계는 여기선 안 씀 — 우리는 자체 기사를 쓰는 게 아니라
        원문 링크를 그대로 전달하는 큐레이션이라 "통합"이 아니라 "생략"이 맞는 대응이다)
 링크: 구글 뉴스 링크는 news.google.com을 거치는 리다이렉트라 googlenewsdecoder로
@@ -197,7 +204,6 @@ def _dedup_window_hours(category: str) -> int:
 # 15.8%(문자)에 그쳐 아래 임계값에 안전하게 못 미친다(진짜 중복과 10%p 이상 여유).
 SUMMARY_WORD_OVERLAP_THRESHOLD = 30  # 이상이면 중복(단어 단위, 작은 쪽 집합 기준 포함비율)
 SUMMARY_CHAR_TRIGRAM_OVERLAP_THRESHOLD = 25  # 이상이면 중복(문자 단위) — 둘 중 하나만 넘어도 중복 처리
-TOPIC_STOPWORDS = {"속보", "단독", "종합", "오늘", "발표", "관련", "최근", "이후", "현재"}
 # 실사고(2026-08-23): 짧은 창(recent_for_dedup) 비교에서 임계값을 살짝 못 넘겨
 # "중복 아님"으로 나온 애매한 후보는, 창 밖의 며칠 전 발송 이력과 비교하면 진짜
 # 중복으로 드러날 수 있다. 임계값에서 이 마진(%p) 안쪽이면 D1에서 더 긴 기간을
@@ -210,6 +216,7 @@ def _is_summary_borderline(word_score: float, char_score: float) -> bool:
     """짧은 창 비교로는 중복이 아니라고 나왔지만 임계값에 근접한 애매한 점수인지."""
     return (word_score >= SUMMARY_WORD_OVERLAP_THRESHOLD - SUMMARY_BORDERLINE_MARGIN
             or char_score >= SUMMARY_CHAR_TRIGRAM_OVERLAP_THRESHOLD - SUMMARY_BORDERLINE_MARGIN)
+TOPIC_STOPWORDS = {"속보", "단독", "종합", "오늘", "발표", "관련", "최근", "이후", "현재"}
 
 # 실사고(2026-08-18): 원래 속보/단독/종합을 합쳐 MAX_SUMMARIZE_PER_RUN=20 /
 # MAX_SEND_PER_RUN=15로 캡을 걸었었다. GOOGLE_NEWS_QUERIES가 속보→단독→종합
@@ -555,7 +562,7 @@ def char_trigram_overlap(a: str, b: str) -> float:
     return _overlap_coeff(_trigrams(a), _trigrams(b))
 
 
-def is_summary_duplicate(text: str, category: str, recent: list):
+def is_summary_duplicate(text: str, category: str, recent: list, title_only: bool = False):
     """요약(또는 요약 실패 시 제목)을 최근 발송분과 비교. (is_dup, score, matched) 반환.
 
     제목 기반 is_duplicate()보다 훨씬 정확하다 — 실측(2026-08-17): 같은 사건을
@@ -568,8 +575,18 @@ def is_summary_duplicate(text: str, category: str, recent: list):
     그쳐 새어나갔다. 같은 데이터를 오버랩 계수로 재보면 38.5%/32.5%로 뚜렷이
     잡힌다(_overlap_coeff 참고).
 
-    호출부(run())가 recent에서 이 후보 자신의 guid를 반드시 제외하고 넘겨야 한다 —
-    2026-08-22 실사고 참고(자기 자신과 비교하면 늘 중복으로 오판된다).
+    title_only: 요약이 없어(Gemini 실패) 제목끼리 비교하는 경우 True로 넘긴다.
+    실사고(2026-08-24): 미 재무부의 이란 제재 발표를 다룬 속보 3건("송금 허가
+    중단"/"2차제재 대상"/"60곳 제재 명단" — 전부 다른 사실)이 요약 실패로 제목만
+    비교됐는데, 셋 다 "美재무부 ... 이란 ..."이라는 짧고 상투적인 문구를 공유해
+    문자 3-gram 오버랩만 가짜로 임계값을 넘었다(단어 오버랩은 28.6%/14.3%로
+    정확히 "다른 기사"라고 판단했다). "둘 중 하나만 넘어도 중복" OR 조건 때문에
+    문자 오버랩 단독 신호로 셋 다 서로를 중복 처리해 0건 발송되는 사고가 났다.
+    요약(80자 이상 문장)은 상투구 비중이 작아 문자 오버랩이 독립 신호로 믿을
+    만하지만, 제목(20~30자)은 기관명·주제어 같은 상투구만으로도 쉽게 임계값을
+    넘는다 — 그래서 제목만 비교할 때는 단어·문자 두 지표가 동시에 임계값을
+    넘어야만 중복으로 판정한다(AND). 요약이 있을 때의 OR 로직은 그대로 둔다 —
+    분량 비대칭 실사고(2026-08-18)로 검증된 동작이라 안 건드린다.
     """
     best_wo, best_co, best_text = 0.0, 0.0, ""
     for item in recent:
@@ -584,8 +601,12 @@ def is_summary_duplicate(text: str, category: str, recent: list):
             if co >= best_co:
                 best_co = co
             best_text = other
-    is_dup = (best_wo >= SUMMARY_WORD_OVERLAP_THRESHOLD
-              or best_co >= SUMMARY_CHAR_TRIGRAM_OVERLAP_THRESHOLD)
+    if title_only:
+        is_dup = (best_wo >= SUMMARY_WORD_OVERLAP_THRESHOLD
+                  and best_co >= SUMMARY_CHAR_TRIGRAM_OVERLAP_THRESHOLD)
+    else:
+        is_dup = (best_wo >= SUMMARY_WORD_OVERLAP_THRESHOLD
+                  or best_co >= SUMMARY_CHAR_TRIGRAM_OVERLAP_THRESHOLD)
     # 실사고(2026-08-20): 시황 속보(코스피/환율 등)는 문구 템플릿이 고정이라
     # 요약끼리도 겹쳐 보이지만 핵심 수치가 다르면 다른 시점의 다른 속보다 —
     # is_duplicate와 동일한 숫자 충돌 가드를 여기도 적용한다.
@@ -1001,7 +1022,9 @@ def run():
         # 계수가 손쉽게 임계값을 넘어 "중복"으로 오판된다 — 실측: 이 사고로 9번 연속
         # 실행 중 7번이 후보가 있었는데도 발송 0건. guid로 자기 자신 항목만 빼고 비교한다.
         recent_excl_self = [r for r in recent_for_dedup if r.get("guid") != c["guid"]]
-        is_dup2, wj, ct, matched2 = is_summary_duplicate(compare_text, category, recent_excl_self)
+        title_only = not bool(c["summary"])
+        is_dup2, wj, ct, matched2 = is_summary_duplicate(compare_text, category, recent_excl_self,
+                                                          title_only=title_only)
 
         # 실사고(2026-08-23): 짧은 창(속보 2시간/단독·종합 12시간) 안에서는 "중복
         # 아님"으로 나왔지만 임계값에 아슬아슬하게 못 미치는 애매한 점수면, 창 밖의
@@ -1011,7 +1034,8 @@ def run():
         if not is_dup2 and _is_summary_borderline(wj, ct):
             d1_recent = query_d1_recent_sent(category, SUMMARY_BORDERLINE_LOOKBACK_DAYS)
             if d1_recent:
-                is_dup2, wj2, ct2, matched2b = is_summary_duplicate(compare_text, category, d1_recent)
+                is_dup2, wj2, ct2, matched2b = is_summary_duplicate(compare_text, category, d1_recent,
+                                                                     title_only=title_only)
                 if is_dup2:
                     wj, ct, matched2 = wj2, ct2, matched2b
                     print(f"  🗄️ D1 재확인(최근 {SUMMARY_BORDERLINE_LOOKBACK_DAYS}일)으로 "
