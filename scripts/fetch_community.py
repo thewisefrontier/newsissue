@@ -51,6 +51,12 @@ fetch_news.py(뉴스 RSS)와는 소스 종류·판정 방식이 완전히 달라
 소스 2(문턱값 소스)는 문턱값 미만인 글을 발송만 안 할 뿐 guid를 기록하지 않으므로,
 나중에 추천·조회가 늘어 문턱값을 넘으면 그때 다시 후보로 잡혀 보내진다.
 
+**성적/혐오/불법 소지 필터**(2026-08-25 사용자 요청): `_is_risky_title()`이
+제목에 붙은 경고 태그(약혐, 후방주의, 19금, 몰카 등)를 걸러낸다. 개별 글은
+크롤링하지 않는 정책(위 4번)상 본문·이미지는 못 보므로 제목의 자기신고 태그에만
+의존한다 — 완벽하지 않다(태그 없이 올라온 글은 못 거른다). 걸러진 글도 guid는
+기록해 다음 실행에서 재평가하지 않는다.
+
 실행: python scripts/fetch_community.py
 """
 
@@ -117,6 +123,25 @@ def _to_int(text: str) -> int | None:
         return None
     digits = re.sub(r"[^\d]", "", text)
     return int(digits) if digits else None
+
+
+# 성적/혐오/불법 소지가 있는 글은 거른다(2026-08-25 사용자 요청). 목록 페이지만
+# 보고 개별 글은 절대 안 열어보는 정책(위 4번)상 본문·이미지는 볼 수 없어, 제목
+# 텍스트만으로 판단할 수 있는 신호만 쓴다 — 한국 커뮤니티는 관례적으로 이런 글에
+# 작성자가 스스로 경고 태그를 붙인다(약혐, 후방주의 등)는 점을 이용한다. 완벽한
+# 필터는 아니다(제목에 신호가 없는 글은 못 거른다) — 놓치는 게 있으면 이 목록에
+# 키워드를 추가할 것.
+_RISKY_TITLE_KEYWORDS = [
+    "약혐", "혐주의", "혐오주의", "고어주의",
+    "19금", "19禁", "후방주의", "노출주의",
+    "성인물", "성인용", "야짤", "야동",
+    "몰카", "몰래카메라", "도촬",
+]
+_RISKY_TITLE_RE = re.compile("|".join(re.escape(w) for w in _RISKY_TITLE_KEYWORDS))
+
+
+def _is_risky_title(title: str) -> bool:
+    return bool(_RISKY_TITLE_RE.search(title))
 
 
 # =========================
@@ -532,6 +557,14 @@ def run():
         for title, url, views, comments, recommend in items:
             guid = hashlib.md5(url.encode("utf-8")).hexdigest()
             if guid in sent_guids:
+                continue
+
+            if _is_risky_title(title):
+                # 발송은 안 하되 매 실행마다 다시 걸러내지 않도록 "본 것"으로는
+                # 기록한다 — bootstrap과 동일하게 처리.
+                new_entries.append({"guid": guid, "source": source["id"], "sent_at": now_kst().isoformat()})
+                sent_guids.add(guid)
+                print(f"  🚫 필터링: {title[:50]}")
                 continue
 
             if is_bootstrap:
