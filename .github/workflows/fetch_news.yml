@@ -113,7 +113,12 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         # 목록 페이지 7곳 순차 요청 + 발송 직전 후보만 크롤링·Gemini 검사
         # (fetch_community.py 옆 주석 참고, 2026-08-25 크롤링·요약 추가로
-        # 아래 GEMINI 키도 같이 필요해짐).
+        # 아래 GEMINI 키도 같이 필요해짐). 이 스텝 자체는 이 워크플로와 동일하게
+        # 10분마다 실행되지만, 커뮤글은 뉴스와 달리 "먼저 알리는 게 가치"가
+        # 아니라는 사용자 지적(2026-08-25)으로 fetch_community.py 안에서 자체
+        # 가드를 둬 실제로는 COMMUNITY_CHECK_INTERVAL_MIN(60분)마다만 일하고
+        # 나머지 실행에서는 네트워크 요청 없이 바로 스킵한다 — 그래서 대부분의
+        # 실행에서 이 스텝은 몇 초 안에 "[SKIP]"만 찍고 끝난다.
         timeout-minutes: 5
         run: python scripts/fetch_community.py
         env:
