@@ -111,13 +111,22 @@ jobs:
 
       - name: 커뮤니티 베스트글 수집 및 발송
         if: steps.guard.outputs.skip != 'true'
-        # 목록 페이지 4곳만 순차 요청(크롤링·Gemini 없음)이라 뉴스보다 훨씬
-        # 빠르다 — fetch_community.py 옆 주석 참고.
+        # 목록 페이지 7곳 순차 요청 + 발송 직전 후보만 크롤링·Gemini 검사
+        # (fetch_community.py 옆 주석 참고, 2026-08-25 크롤링·요약 추가로
+        # 아래 GEMINI 키도 같이 필요해짐).
         timeout-minutes: 5
         run: python scripts/fetch_community.py
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          # 실사고(2026-08-25): 이 env가 빠져 있어서 summarize_and_check()의
+          # 2차 위험판정(Gemini)이 운영에서 매번 즉시 fail-open됐다 — 크롤링·
+          # 요약을 추가하면서 이 스텝의 env 갱신을 놓쳤다. 키워드 1차 필터만
+          # 유일한 방어선이었던 게 "후방)" 같은 축약 태그를 못 잡은 그날 사고의
+          # 진짜 원인. fetch_news.py 스텝과 같은 키를 그대로 쓴다(쿼터 공유,
+          # fetch_community.py 상단 docstring 참고).
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
 
       - name: state.json 캐시 저장
         # 위 스텝이 타임아웃/실패로 중단돼도 그때까지 처리된 상태는 저장한다.
