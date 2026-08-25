@@ -295,14 +295,16 @@ def test_summarize_and_check_fails_open():
 
 def _make_candidate(n: int, summary: str = "") -> dict:
     return {
-        "guid": f"guid{n}", "source": "ruliweb", "emoji": "🔵",
+        "guid": f"guid{n}", "source": "ruliweb", "emoji": "🔵", "tag": "루리웹",
         "title": f"합성 제목 {n}", "url": f"https://example.com/{n}", "summary": summary,
     }
 
 
 def test_build_digest_chunks_single():
     """후보가 적으면 청크가 하나로 묶이고, 그 청크의 후보 목록이 순서대로
-    그대로 들어있는지 확인한다."""
+    그대로 들어있는지, 소스 태그(2026-08-25부터 [커뮤] 대신 [루리웹] 식으로
+    소스명을 붙인다 — 사용자 지적: "이렇게 모음으로 할거면 [커뮤]를 붙이는게
+    아니라 각기 출처가 어딘지 붙이는게 좋을 것 같은데")가 들어가는지 확인한다."""
     candidates = [_make_candidate(1), _make_candidate(2, "요약 텍스트")]
     chunks = build_digest_chunks(candidates)
     text, items = chunks[0] if chunks else ("", [])
@@ -311,6 +313,7 @@ def test_build_digest_chunks_single():
         and check("청크 안 후보 순서 유지", [c["guid"] for c in items] == ["guid1", "guid2"], f"got {items}")
         and check("제목 링크 포함", "합성 제목 1" in text and "합성 제목 2" in text)
         and check("요약 텍스트 포함", "요약 텍스트" in text)
+        and check("소스 태그([루리웹]) 포함, [커뮤] 아님", "[루리웹]" in text and "[커뮤]" not in text, f"got {text!r}")
     )
 
 
