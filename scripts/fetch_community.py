@@ -563,6 +563,7 @@ SOURCES = [
     {
         "id": "ruliweb",
         "name": "루리웹 베스트",
+        "tag": "루리웹",
         "emoji": "🔵",
         "url": "https://bbs.ruliweb.com/best/all",
         "parse": parse_ruliweb,
@@ -571,6 +572,7 @@ SOURCES = [
     {
         "id": "theqoo",
         "name": "더쿠 HOT",
+        "tag": "더쿠",
         "emoji": "🟣",
         "url": "https://theqoo.net/hot",
         "parse": parse_theqoo,
@@ -579,6 +581,7 @@ SOURCES = [
     {
         "id": "dc_neostock",
         "name": "디시 주식갤 개념글",
+        "tag": "디시 주식갤",
         "emoji": "🟢",
         "url": "https://gall.dcinside.com/board/lists/?id=neostock&exception_mode=recommend",
         "parse": parse_dcinside,
@@ -587,6 +590,7 @@ SOURCES = [
     {
         "id": "dc_immovables",
         "name": "디시 부동산갤 개념글",
+        "tag": "디시 부동산갤",
         "emoji": "🟢",
         "url": "https://gall.dcinside.com/board/lists/?id=immovables&exception_mode=recommend",
         "parse": parse_dcinside,
@@ -599,6 +603,7 @@ SOURCES = [
     {
         "id": "clien",
         "name": "클리앙 모두의공원",
+        "tag": "클리앙",
         "emoji": "🟠",
         "url": "https://www.clien.net/service/board/park",
         "parse": parse_clien,
@@ -607,6 +612,7 @@ SOURCES = [
     {
         "id": "inven",
         "name": "인벤 오픈이슈갤러리",
+        "tag": "인벤",
         "emoji": "🟠",
         "url": "https://www.inven.co.kr/board/webzine/2097",
         "parse": parse_inven,
@@ -615,6 +621,7 @@ SOURCES = [
     {
         "id": "ppomppu",
         "name": "뽐뿌 자유게시판",
+        "tag": "뽐뿌",
         "emoji": "🟠",
         "url": "https://www.ppomppu.co.kr/zboard/zboard.php?id=freeboard",
         "parse": parse_ppomppu,
@@ -669,28 +676,31 @@ def prune_state(state: dict):
 # TELEGRAM
 # =========================
 
-def _format_digest_item(emoji: str, title: str, url: str, summary: str) -> str:
+def _format_digest_item(emoji: str, tag: str, title: str, url: str, summary: str) -> str:
     """다이제스트 한 줄(글 하나) 포맷. 개별 발송 시절의 footer("출처" 링크)는
-    뺐다 — 제목 자체가 이미 그 글로 가는 링크라 중복이다. [커뮤] 태그는
-    유지한다(뉴스와 구분하는 공통 카테고리 태그라는 취지는 다이제스트에서도
-    그대로 적용됨)."""
+    뺐다 — 제목 자체가 이미 그 글로 가는 링크라 중복이다. 태그는 [커뮤]에서
+    [루리웹]/[뽐뿌]처럼 소스명으로 바꿨다(2026-08-25 사용자 지적 — "이렇게
+    모음으로 할거면 [커뮤]를 붙이는게 아니라 각기 출처가 어딘지 붙이는게 좋을
+    것 같은데"). 다이제스트 한 통에 여러 소스가 섞여 나오니 이모지만으로는
+    구분이 약하고, 뉴스와의 구분은 헤더("커뮤니티 베스트 모음")가 이미
+    해준다 — 그래서 [커뮤] 태그는 더 필요 없어졌다."""
     title_safe = html.escape(title)
     title_linked = f'<a href="{url}">{title_safe}</a>'
     summary_line = f"\n{html.escape(summary)}" if summary else ""
-    return f"{emoji} [커뮤] {title_linked}{summary_line}"
+    return f"{emoji} [{tag}] {title_linked}{summary_line}"
 
 
 def build_digest_chunks(candidates: list) -> list:
-    """후보 목록(dict: guid/source/emoji/title/url/summary)을 텔레그램 메시지
-    상한(DIGEST_MAX_CHARS)을 넘지 않는 청크로 묶는다. 순수 함수라 네트워크
-    없이 테스트 가능 — 반환값은 [(메시지 텍스트, 그 청크에 들어간 후보 리스트), ...].
-    보통은 청크가 1개뿐이지만(체크 주기가 1시간이라 후보 수가 적음), 드물게
-    넘치면 여러 통으로 나눠 보낸다."""
+    """후보 목록(dict: guid/source/tag/emoji/title/url/summary)을 텔레그램
+    메시지 상한(DIGEST_MAX_CHARS)을 넘지 않는 청크로 묶는다. 순수 함수라
+    네트워크 없이 테스트 가능 — 반환값은 [(메시지 텍스트, 그 청크에 들어간
+    후보 리스트), ...]. 보통은 청크가 1개뿐이지만(체크 주기가 1시간이라 후보
+    수가 적음), 드물게 넘치면 여러 통으로 나눠 보낸다."""
     chunks = []
     current_items: list = []
     current_lines: list = []
     for cand in candidates:
-        line = _format_digest_item(cand["emoji"], cand["title"], cand["url"], cand["summary"])
+        line = _format_digest_item(cand["emoji"], cand["tag"], cand["title"], cand["url"], cand["summary"])
         header = f"🗂 <b>커뮤니티 베스트 모음</b> ({len(current_items) + 1}건)"
         projected = header + "\n\n" + "\n\n".join(current_lines + [line])
         if current_lines and len(projected) > DIGEST_MAX_CHARS:
@@ -823,7 +833,7 @@ def run():
                 continue
 
             digest_candidates.append({
-                "guid": guid, "source": source["id"], "emoji": source["emoji"],
+                "guid": guid, "source": source["id"], "emoji": source["emoji"], "tag": source["tag"],
                 "title": title, "url": url, "summary": summary,
             })
 
