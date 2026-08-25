@@ -15,7 +15,7 @@ import sys
 import fetch_community as fc
 from fetch_community import (
     parse_ruliweb, parse_theqoo, parse_dcinside, parse_clien, parse_inven, parse_ppomppu,
-    _is_risky_title, _parse_gemini_verdict, summarize_and_check,
+    _is_risky_title, _parse_gemini_verdict, summarize_and_check, build_digest_chunks,
 )
 
 
@@ -293,6 +293,51 @@ def test_summarize_and_check_fails_open():
     )
 
 
+def _make_candidate(n: int, summary: str = "") -> dict:
+    return {
+        "guid": f"guid{n}", "source": "ruliweb", "emoji": "🔵",
+        "title": f"합성 제목 {n}", "url": f"https://example.com/{n}", "summary": summary,
+    }
+
+
+def test_build_digest_chunks_single():
+    """후보가 적으면 청크가 하나로 묶이고, 그 청크의 후보 목록이 순서대로
+    그대로 들어있는지 확인한다."""
+    candidates = [_make_candidate(1), _make_candidate(2, "요약 텍스트")]
+    chunks = build_digest_chunks(candidates)
+    text, items = chunks[0] if chunks else ("", [])
+    return (
+        check("후보 2건은 청크 1개로 묶임", len(chunks) == 1, f"got {len(chunks)}")
+        and check("청크 안 후보 순서 유지", [c["guid"] for c in items] == ["guid1", "guid2"], f"got {items}")
+        and check("제목 링크 포함", "합성 제목 1" in text and "합성 제목 2" in text)
+        and check("요약 텍스트 포함", "요약 텍스트" in text)
+    )
+
+
+def test_build_digest_chunks_empty():
+    """후보가 없으면 청크도 없어야 한다(발송 자체를 안 함)."""
+    return check("빈 후보는 청크 0개", build_digest_chunks([]) == [])
+
+
+def test_build_digest_chunks_splits_when_too_long():
+    """DIGEST_MAX_CHARS를 넘기면 청크를 나누고, 나뉜 청크들의 후보를 합치면
+    원래 후보 전체와 정확히 일치하는지(유실·중복 없음) 확인한다."""
+    original_max = fc.DIGEST_MAX_CHARS
+    try:
+        fc.DIGEST_MAX_CHARS = 200  # 후보 몇 건만 지나도 넘치도록 작게 설정
+        candidates = [_make_candidate(i, "긴 요약 텍스트로 길이를 채운다" * 3) for i in range(6)]
+        chunks = build_digest_chunks(candidates)
+        all_items = [c for _, items in chunks for c in items]
+        return (
+            check("청크가 2개 이상으로 나뉨", len(chunks) > 1, f"got {len(chunks)}")
+            and check("모든 후보가 정확히 한 번씩 들어감",
+                      [c["guid"] for c in all_items] == [c["guid"] for c in candidates],
+                      f"got {[c['guid'] for c in all_items]}")
+        )
+    finally:
+        fc.DIGEST_MAX_CHARS = original_max
+
+
 def main():
     results = [
         test_parse_ruliweb(),
@@ -304,6 +349,9 @@ def main():
         test_is_risky_title(),
         test_parse_gemini_verdict(),
         test_summarize_and_check_fails_open(),
+        test_build_digest_chunks_single(),
+        test_build_digest_chunks_empty(),
+        test_build_digest_chunks_splits_when_too_long(),
     ]
     print()
     if all(results):
