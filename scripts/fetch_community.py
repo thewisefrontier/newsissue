@@ -608,6 +608,10 @@ def send_telegram(source: dict, title: str, url: str, summary: str = "") -> dict
     앞에 "[루리웹 베스트]" 같은 소스명 대괄호를 붙이지 않고, news와 똑같이
     footer의 "출처" 링크 하나로만 소스를 표시한다 — 소스 구분은 이모지(source
     마다 다름)로 충분하고, 어느 글인지는 미리보기 카드로 바로 확인된다.
+    다만 news의 [속보]/[단독]/[종합]처럼 "이게 뉴스인지 커뮤글인지"를 한눈에
+    구분할 카테고리 태그가 없다는 사용자 지적으로 "[커뮤]"를 이모지 뒤에
+    붙인다(2026-08-25) — 소스별 이름표가 아니라 뉴스와 구분하기 위한 공통
+    카테고리 태그라 위 "소스명 대괄호 안 붙임" 결정과는 안 부딪힌다.
     조회수·댓글수·추천수는 여전히 메시지엔 안 넣는다(문턱값 판정에만 쓴다).
     미리보기 이미지도 news의 단독 기사와 동일하게 prefer_small_media로
     작게 띄운다(2026-08-25 사용자 요청 — 큰 사진 대신 작은 썸네일). ⚠️ Bot API
@@ -624,7 +628,7 @@ def send_telegram(source: dict, title: str, url: str, summary: str = "") -> dict
         f"\n\n📎 <a href=\"{url}\">출처</a> | "
         f"<a href=\"{CHANNEL_URL}\">{CHANNEL_TAG}</a>"
     )
-    msg = f"{source['emoji']} {title_linked}{summary_block}{footer_line}"
+    msg = f"{source['emoji']} [커뮤] {title_linked}{summary_block}{footer_line}"
     data = {
         "chat_id": CHAT_ID,
         "text": msg,
