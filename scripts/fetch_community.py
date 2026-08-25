@@ -1,13 +1,30 @@
 """
 scripts/fetch_community.py
 ----------------------------
-"뉴스 앤 이슈" 채널에 각종 커뮤니티의 베스트 게시글을 실시간 푸시한다(2026-08-25
-사용자 요청 — "속보처럼 텔레그램에 바로 올리는 방식으로").
+"뉴스 앤 이슈" 채널에 각종 커뮤니티의 베스트 게시글을 푸시한다(2026-08-25 사용자
+요청 — "속보처럼 텔레그램에 바로 올리는 방식으로"로 시작했다가, 같은 날 "커뮤글의
+경우는 사실 속도가 문제가 아니란말야"는 지적으로 방향이 바뀌었다 — 아래
+"체크 주기와 다이제스트" 항목 참고).
 
 fetch_news.py(뉴스 RSS)와는 소스 종류·판정 방식이 완전히 달라 별도 스크립트로
-분리했다. 다만 사고방식은 같다: 게시판이 이미 "베스트"로 골라준 목록을 그대로
-따라가며, 이미 보낸 글(URL 기준)만 걸러내고 새 글은 즉시 보낸다 — 뉴스의 [속보]와
-동일하게 "지금 막 올라온 걸 바로 알린다"가 목적이라 순위·점수 집계는 하지 않는다.
+분리했다. 다만 사고방식은 비슷하다: 게시판이 이미 "베스트"로 골라준 목록을 그대로
+따라가며, 이미 보낸 글(URL 기준)만 걸러낸다 — 다만 뉴스의 [속보]와 달리 "먼저
+알리는 것"이 가치가 아니므로, 새 글을 즉시 개별 발송하지 않고 체크 주기마다 모아
+다이제스트 하나로 보낸다.
+
+**체크 주기와 다이제스트(2026-08-25, 방향 전환)**: 처음엔 뉴스처럼 워크플로가
+트리거될 때마다(10분마다) 문턱값을 넘는 새 글을 그때그때 개별 메시지로 즉시
+발송했다. 사용자가 "커뮤글의 경우는 사실 속도가 문제가 아니란말야. 뉴스랑은 좀
+달라"라고 지적 — 커뮤 베스트글은 이미 한창 화제였던 글이라 몇 분~1시간 늦게
+보내도 손해가 없다. "발송 간격을 늘리고 모아서 보내는 걸로"로 확정해 두 가지를
+같이 바꿨다: (1) `COMMUNITY_CHECK_INTERVAL_MIN`(기본 60분) 동안은 이 스크립트가
+실제로는 아무 것도 안 하고 바로 리턴한다(`run()`의 `last_run_at` 가드 — 워크플로
+자체는 여전히 10분마다 돌지만 네트워크 요청 없이 즉시 스킵). (2) 그 체크 주기
+동안 모인 후보를 개별 메시지 대신 `build_digest_chunks()`로 묶어 다이제스트
+한 통(또는 길면 여러 통)으로 보낸다 — `send_digest_chunk()` 참고. 부수 효과로,
+개별 발송을 여러 번 연달아 보낼 때 텔레그램 자체 미리보기 생성이 못 따라가던
+문제(SEND_INTERVAL_SEC 옆 주석 참고)도 자연히 없어졌다 — 애초에 연속 발송을
+안 하니까.
 
 **소스 선정 기준(2026-08-24/25 조사)**: 무차별로 아무 커뮤니티나 넣지 않았다.
 1) robots.txt의 `User-agent: *` 규칙(우리 스크립트에 실제로 적용되는 규칙)이
@@ -120,15 +137,25 @@ USER_AGENT = "newsissue-community-bot/1.0 (+https://github.com/thewisefrontier/n
 REQUEST_TIMEOUT_SEC = 10
 # 소스 사이 예의상 지연 — 순차 요청, 동시 요청 안 함.
 SOURCE_DELAY_SEC = 1.5
-# 1.5초였다가 3초로 늘렸다(2026-08-25 사용자 요청, 실험) — 클리앙처럼 링크 있는
-# 메시지를 짧은 간격으로 연달아 보내면 텔레그램 자체 미리보기 생성이 일부
-# 빠지는 현상을 사용자가 실제로 목격했다. 우리 쪽(og:description은 전부 있고
-# 클리앙이 TelegramBot UA를 차단하지도 않음을 실측 확인)이 원인이 아니라
-# 텔레그램의 비동기 미리보기 생성이 연속 발송을 못 따라가는 것으로 의심되어,
-# 발송 간격을 늘려 개선되는지 지켜보는 중이다 — 아직 확정된 원인/해결책은
-# 아니다. 개선이 안 보이면 원래대로 되돌릴 것.
+# 다이제스트 청크 사이 대기(청크가 여러 개일 때만 씀 — 아래 COMMUNITY_CHECK_
+# INTERVAL_MIN 참고). 원래는 개별 글마다 발송 간격으로 썼던 값인데(1.5초→3초
+# 실험, 클리앙 미리보기가 연속 발송에 밀리는 문제 대응), 다이제스트로 바뀌면서
+# 그 문제 자체가 없어졌다 — 메시지 한 통에 몰아 보내니 "연속 발송"이 아니다.
 SEND_INTERVAL_SEC = 3.0
 TELEGRAM_MAX_RETRIES = 3
+
+# 커뮤글은 뉴스처럼 "먼저 알리는 게 가치"가 아니라는 사용자 지적(2026-08-25,
+# "커뮤글의 경우는 사실 속도가 문제가 아니란말야") — 몇 분 늦게 보내도 손해가
+# 없다. 그래서 10분마다 트리거되는 워크플로 안에서도 실제로는 이 주기마다만
+# 체크하고, 나머지 실행에서는 네트워크 요청 없이 바로 건너뛴다(아래 run()의
+# last_run_at 가드). 뉴스(fetch_news.py)는 그대로 10분마다 매번 돈다 — 빠른
+# 소식이 가치인 쪽만 그 속도를 유지한다.
+COMMUNITY_CHECK_INTERVAL_MIN = 60
+# 이번 체크에서 모인 후보를 개별 메시지 대신 다이제스트 한 통(또는 길면 여러
+# 통)으로 묶어 보낸다(2026-08-25 사용자 결정 — "발송 간격을 늘리고 모아서
+# 보내는 걸로"). 텔레그램 메시지 상한은 4096자라 여유를 두고 이 값을 넘기
+# 직전에 청크를 끊는다.
+DIGEST_MAX_CHARS = 3500
 
 # 상태 파일이 무한정 커지지 않도록 오래된 guid는 정리한다. 커뮤니티 베스트글은
 # 뉴스보다 훨씬 빨리 순환하므로(대부분 하루 안에 목록에서 밀려남) 3일이면
@@ -642,37 +669,56 @@ def prune_state(state: dict):
 # TELEGRAM
 # =========================
 
-def send_telegram(source: dict, title: str, url: str, summary: str = "") -> dict:
-    """fetch_news.py의 메시지 형식과 통일한다(사용자 피드백, 2026-08-25):
-    앞에 "[루리웹 베스트]" 같은 소스명 대괄호를 붙이지 않고, news와 똑같이
-    footer의 "출처" 링크 하나로만 소스를 표시한다 — 소스 구분은 이모지(source
-    마다 다름)로 충분하고, 어느 글인지는 미리보기 카드로 바로 확인된다.
-    다만 news의 [속보]/[단독]/[종합]처럼 "이게 뉴스인지 커뮤글인지"를 한눈에
-    구분할 카테고리 태그가 없다는 사용자 지적으로 "[커뮤]"를 이모지 뒤에
-    붙인다(2026-08-25) — 소스별 이름표가 아니라 뉴스와 구분하기 위한 공통
-    카테고리 태그라 위 "소스명 대괄호 안 붙임" 결정과는 안 부딪힌다.
-    조회수·댓글수·추천수는 여전히 메시지엔 안 넣는다(문턱값 판정에만 쓴다).
-    미리보기 이미지도 news의 단독 기사와 동일하게 prefer_small_media로
-    작게 띄운다(2026-08-25 사용자 요청 — 큰 사진 대신 작은 썸네일). ⚠️ Bot API
-    문서: prefer_small_media는 url을 명시적으로 같이 안 주면 무시된다 —
-    wise-frontier(NewsFinal) 프로젝트가 2026-08-18에 이미 이 문제를 겪고
-    고친 기록이 있어(gemini_writer.py) 처음부터 url을 같이 넣는다. summary는
-    summarize_and_check()가 뽑은 1문장 요약(2026-08-25 추가 — 텍스트/영상 위주
-    글은 미리보기 카드가 비어서 요약이 필요하다는 지적) — 없으면(크롤링/Gemini
-    실패, 영상·이미지 위주 글) 그냥 생략한다."""
+def _format_digest_item(emoji: str, title: str, url: str, summary: str) -> str:
+    """다이제스트 한 줄(글 하나) 포맷. 개별 발송 시절의 footer("출처" 링크)는
+    뺐다 — 제목 자체가 이미 그 글로 가는 링크라 중복이다. [커뮤] 태그는
+    유지한다(뉴스와 구분하는 공통 카테고리 태그라는 취지는 다이제스트에서도
+    그대로 적용됨)."""
     title_safe = html.escape(title)
     title_linked = f'<a href="{url}">{title_safe}</a>'
-    summary_block = f"\n\n{html.escape(summary)}" if summary else ""
-    footer_line = (
-        f"\n\n📎 <a href=\"{url}\">출처</a> | "
-        f"<a href=\"{CHANNEL_URL}\">{CHANNEL_TAG}</a>"
-    )
-    msg = f"{source['emoji']} [커뮤] {title_linked}{summary_block}{footer_line}"
+    summary_line = f"\n{html.escape(summary)}" if summary else ""
+    return f"{emoji} [커뮤] {title_linked}{summary_line}"
+
+
+def build_digest_chunks(candidates: list) -> list:
+    """후보 목록(dict: guid/source/emoji/title/url/summary)을 텔레그램 메시지
+    상한(DIGEST_MAX_CHARS)을 넘지 않는 청크로 묶는다. 순수 함수라 네트워크
+    없이 테스트 가능 — 반환값은 [(메시지 텍스트, 그 청크에 들어간 후보 리스트), ...].
+    보통은 청크가 1개뿐이지만(체크 주기가 1시간이라 후보 수가 적음), 드물게
+    넘치면 여러 통으로 나눠 보낸다."""
+    chunks = []
+    current_items: list = []
+    current_lines: list = []
+    for cand in candidates:
+        line = _format_digest_item(cand["emoji"], cand["title"], cand["url"], cand["summary"])
+        header = f"🗂 <b>커뮤니티 베스트 모음</b> ({len(current_items) + 1}건)"
+        projected = header + "\n\n" + "\n\n".join(current_lines + [line])
+        if current_lines and len(projected) > DIGEST_MAX_CHARS:
+            chunks.append((_finalize_digest_chunk(current_lines), current_items))
+            current_lines = [line]
+            current_items = [cand]
+        else:
+            current_lines.append(line)
+            current_items.append(cand)
+    if current_lines:
+        chunks.append((_finalize_digest_chunk(current_lines), current_items))
+    return chunks
+
+
+def _finalize_digest_chunk(lines: list) -> str:
+    header = f"🗂 <b>커뮤니티 베스트 모음</b> ({len(lines)}건)"
+    return header + "\n\n" + "\n\n".join(lines)
+
+
+def send_digest_chunk(text: str) -> dict:
+    """다이제스트 청크 하나를 발송한다. 링크가 여러 개 섞이므로 미리보기는
+    아예 끈다(is_disabled) — 개별 발송 때처럼 특정 글 하나만 썸네일로 띄우면
+    나머지 글과 형평이 안 맞고 헷갈린다."""
     data = {
         "chat_id": CHAT_ID,
-        "text": msg,
+        "text": text,
         "parse_mode": "HTML",
-        "link_preview_options": json.dumps({"prefer_small_media": True, "url": url}),
+        "link_preview_options": json.dumps({"is_disabled": True}),
     }
     # fetch_news.py의 send_telegram과 동일한 429 재시도 로직 — 텔레그램 플러드
     # 컨트롤이 API 응답과 실제 발송을 분리 처리하는 문제가 여기도 똑같이 적용될
@@ -689,7 +735,7 @@ def send_telegram(source: dict, title: str, url: str, summary: str = "") -> dict
             return result
         retry_after = (result.get("parameters") or {}).get("retry_after")
         if retry_after and attempt < TELEGRAM_MAX_RETRIES - 1:
-            print(f"  ⏳ 429(재시도 {attempt+1}/{TELEGRAM_MAX_RETRIES}), {retry_after}초 대기: {title[:40]}")
+            print(f"  ⏳ 429(재시도 {attempt+1}/{TELEGRAM_MAX_RETRIES}), {retry_after}초 대기")
             time.sleep(retry_after)
             continue
         return result
@@ -707,12 +753,26 @@ def run():
 
     state = load_state()
     prune_state(state)
+
+    # 커뮤글은 뉴스처럼 "먼저 알리는 게 가치"가 아니다(2026-08-25 사용자 지적) —
+    # 워크플로 자체는 10분마다 트리거되지만, 여기서 마지막 체크 이후 경과 시간을
+    # 보고 COMMUNITY_CHECK_INTERVAL_MIN(60분) 미만이면 네트워크 요청 없이 바로
+    # 건너뛴다. last_run_at이 없으면(첫 실행) 그냥 진행한다.
+    last_run_at = state.get("last_run_at")
+    if last_run_at:
+        elapsed_min = (now_kst() - datetime.fromisoformat(last_run_at)).total_seconds() / 60
+        if elapsed_min < COMMUNITY_CHECK_INTERVAL_MIN:
+            print(f"[SKIP] 직전 체크 {elapsed_min:.0f}분 전 — {COMMUNITY_CHECK_INTERVAL_MIN}분 주기라 이번엔 건너뜀")
+            return
+
     sent_guids = {s["guid"] for s in state["sent"]}
     # 소스별로 "이번이 첫 수집인가"를 판단하기 위해 이미 알고 있는 소스 id를 모은다.
     known_source_ids = {s.get("source") for s in state["sent"]}
 
     new_entries = []
-    sent_count = 0
+    # 문턱값·필터를 다 통과한 진짜 후보만 여기 모은다 — 개별 발송 대신 이번
+    # 체크가 끝난 뒤 한꺼번에 다이제스트로 묶어 보낸다(2026-08-25 사용자 결정).
+    digest_candidates = []
 
     for source in SOURCES:
         items = fetch_source(source)
@@ -762,19 +822,37 @@ def run():
                 print(f"  🚫 Gemini 필터링: {title[:50]}")
                 continue
 
-            res = send_telegram(source, title, url, summary)
-            if res.get("ok"):
-                sent_count += 1
-                new_entries.append({"guid": guid, "source": source["id"], "sent_at": now_kst().isoformat()})
-                sent_guids.add(guid)
-                print(f"  ✅ {title[:50]}")
-            else:
-                print(f"  ❌ 발송 실패: {res}")
-            time.sleep(SEND_INTERVAL_SEC)
+            digest_candidates.append({
+                "guid": guid, "source": source["id"], "emoji": source["emoji"],
+                "title": title, "url": url, "summary": summary,
+            })
 
         time.sleep(SOURCE_DELAY_SEC)
 
+    sent_count = 0
+    if digest_candidates:
+        chunks = build_digest_chunks(digest_candidates)
+        for i, (text, chunk_items) in enumerate(chunks):
+            res = send_digest_chunk(text)
+            if res.get("ok"):
+                sent_count += len(chunk_items)
+                for item in chunk_items:
+                    new_entries.append({
+                        "guid": item["guid"], "source": item["source"], "sent_at": now_kst().isoformat(),
+                    })
+                    sent_guids.add(item["guid"])
+                print(f"  ✅ 다이제스트 청크 {i + 1}/{len(chunks)} 발송 ({len(chunk_items)}건)")
+            else:
+                # 실패한 청크의 후보는 guid를 기록하지 않는다 — 다음 체크에서
+                # 다시 후보로 잡혀 재시도된다.
+                print(f"  ❌ 다이제스트 청크 {i + 1}/{len(chunks)} 발송 실패: {res}")
+            if i < len(chunks) - 1:
+                time.sleep(SEND_INTERVAL_SEC)
+    else:
+        print("  (이번 체크에서 새로 보낼 커뮤글 없음)")
+
     state["sent"].extend(new_entries)
+    state["last_run_at"] = now_kst().isoformat()
     save_state(state)
 
     print(f"\n[완료] 발송 {sent_count}건 / 신규 기록 {len(new_entries)}건")
