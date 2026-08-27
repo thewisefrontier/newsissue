@@ -852,6 +852,9 @@ def summarize_with_gemini(title: str, raw_text: str, category: str = "") -> str:
                 if text and _looks_like_refusal(text):
                     print(f"  ⚠️ Gemini({model}) 본문 미확인 메타응답, 폴백: {text[:40]}")
                     continue
+                if text and _lacks_korean(text):
+                    print(f"  ⚠️ Gemini({model}) 한글 없는 응답(에러 페이지 등 오염 의심), 폴백: {text[:40]}")
+                    continue
                 if text:
                     _current_key_idx = (idx + 1) % n
                     return text
@@ -887,6 +890,20 @@ def _looks_like_refusal(text: str) -> bool:
     """Gemini가 빈 문자열 대신 낸 '본문을 못 찾았다'류 메타 응답, 또는 원문 자체가
     아직 본기사 없는 속보 자리채움 문구인지 판정."""
     return any(mark in text for mark in _REFUSAL_MARKS) or any(mark in text for mark in _STUB_ARTICLE_MARKS)
+
+
+_HANGUL_RE = re.compile(r"[가-힣]")
+
+
+def _lacks_korean(text: str) -> bool:
+    """실사고(2026-08-27): 조선일보 기사 크롤링이 사이트 쪽 오류 페이지("An error
+    occurred on the server. Please try again.")를 200으로 받아왔고, 그 영문
+    문구가 요약인 것처럼 그대로 발송됐다. _REFUSAL_MARKS는 한국어 거부 문구
+    사례만 나열한 목록이라 영문 에러 텍스트는 못 걸렀다 — 개별 문자열을 추가하는
+    대신, 프롬프트가 애초에 요구하는 "한국어 요약"이라는 불변조건 자체를 검사한다:
+    한글이 한 글자도 없으면 언어를 막론하고 무엇이 새어 들어왔든(에러 페이지,
+    다른 언어 응답 등) 요약이 아니라고 보고 폴백한다."""
+    return bool(text) and not _HANGUL_RE.search(text)
 
 
 # =========================
