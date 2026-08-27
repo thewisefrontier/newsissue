@@ -20,6 +20,7 @@ from fetch_news import (
     is_duplicate,
     is_summary_duplicate,
     _looks_like_refusal,
+    _lacks_korean,
     word_overlap,
     char_trigram_overlap,
     _article_age_hours,
@@ -313,6 +314,25 @@ def test_refusal_marks():
     return ok
 
 
+def test_lacks_korean():
+    """실사고(2026-08-27): 조선일보 기사 크롤링이 사이트 오류 페이지("An error
+    occurred on the server. Please try again.")를 200으로 받아왔고, 그 영문
+    문구가 요약인 것처럼 그대로 발송됐다. _REFUSAL_MARKS(한국어 거부 문구
+    나열)로는 영문 텍스트를 못 걸러서, "한국어 요약"이라는 불변조건 자체를
+    검사하는 별도 가드를 추가했다 — 한글이 한 글자도 없으면 무엇이 새어
+    들어왔든 요약이 아니라고 본다."""
+    cases = [
+        ("An error occurred on the server. Please try again.", True),
+        ("정성호 법무부 장관이 사직서를 제출했다고 밝혔다.", False),
+        ("", False),  # 빈 문자열은 별개 분기(if not raw_text)에서 처리 — 여기선 False만 확인
+    ]
+    ok = True
+    for text, expected in cases:
+        got = _lacks_korean(text)
+        ok = check(f"_lacks_korean({text[:30]!r}) == {expected}", got == expected) and ok
+    return ok
+
+
 def main():
     results = [
         test_stage1_title_same_batch(),
@@ -329,6 +349,7 @@ def main():
         test_should_bypass_title_dup_on_different_link(),
         test_title_only_requires_both_scores(),
         test_refusal_marks(),
+        test_lacks_korean(),
     ]
     print()
     if all(results):
