@@ -221,6 +221,20 @@ def _is_risky_title(title: str) -> bool:
     return bool(_RISKY_TITLE_RE.search(title)) or bool(_RISKY_TAG_RE.search(title))
 
 
+# 실사고(2026-09-23): 60분 체크주기 동안 쌓인 후보가 많으면(특히 Gemini가 위험
+# 판정해 재시도 없이 버리는 항목이 많을 때) 크롤링+Gemini 검사 총 소요가 워크플로
+# 스텝 타임아웃(5분)을 넘겨 매 10분 트리거마다 실패했다 — last_run_at 저장 전에
+# 끊기니 다음 실행도 같은 백로그를 처음부터 재처리해 무한 실패 루프가 됐다.
+# fetch_news.py의 GEMINI_TIME_BUDGET_SEC과 같은 패턴으로 예산을 두고, 넘으면
+# 남은 후보는 크롤링하지 않고 다음 체크로 미룬다(어차피 run() 끝에서 last_run_at은
+# 갱신되므로 루프가 끊긴다).
+COMMUNITY_RUN_TIME_BUDGET_SEC = 240
+
+
+def _time_budget_exceeded(run_start: float) -> bool:
+    return time.monotonic() - run_start > COMMUNITY_RUN_TIME_BUDGET_SEC
+
+
 def crawl_post_text(url: str) -> str:
     """개별 글 페이지에서 본문 후보 텍스트를 긁어온다. fetch_news.py의
     crawl_article_text와 완전히 같은 전략(정교한 스코핑 대신 nav/header/footer/
@@ -783,6 +797,7 @@ def run():
     # 문턱값·필터를 다 통과한 진짜 후보만 여기 모은다 — 개별 발송 대신 이번
     # 체크가 끝난 뒤 한꺼번에 다이제스트로 묶어 보낸다(2026-08-25 사용자 결정).
     digest_candidates = []
+    run_start = time.monotonic()
 
     for source in SOURCES:
         items = fetch_source(source)
@@ -822,6 +837,11 @@ def run():
             if min_views is not None and (views is None or views < min_views):
                 continue
 
+            if _time_budget_exceeded(run_start):
+                # 남은 후보는 크롤링하지 않고 건너뛴다(sent_guids에 기록 안 함) —
+                # 다음 체크 때 문턱값을 여전히 넘으면 그때 다시 후보로 잡힌다.
+                continue
+
             # 여기까지 온 건 진짜로 보낼 후보뿐이다 — 크롤링·Gemini 호출을 발송
             # 직전으로 미뤄서 문턱값 미달로 어차피 안 보낼 글에는 요청을 안 보낸다.
             raw_text = crawl_post_text(url)
@@ -839,6 +859,17 @@ def run():
 
         time.sleep(SOURCE_DELAY_SEC)
 
+    # 실사고(2026-09-23): 상태 저장을 run() 맨 끝에서 딱 한 번만 했더니, 발송
+    # 도중 워크플로 스텝 타임아웃으로 프로세스가 죽으면 텔레그램은 이미 나갔는데
+    # (되돌릴 수 없는 부수효과) "보냈다"는 기록은 저장되기 전이라 증발했다 —
+    # 다음 체크가 이를 모르고 같은/겹치는 후보를 또 보냈다("텔레 전송은 계속
+    # 되는 것 같던데" 사용자 확인). 여기까지 모은 것(부트스트랩·필터링 기록)을
+    # 먼저 저장해 체크 자체는 진행된 것으로 남기고, 다이제스트 청크는 하나
+    # 보낼 때마다 바로 저장해 청크 N까지 성공한 뒤 죽어도 N까지는 기록에 남는다.
+    state["sent"].extend(new_entries)
+    state["last_run_at"] = now_kst().isoformat()
+    save_state(state)
+
     sent_count = 0
     if digest_candidates:
         chunks = build_digest_chunks(digest_candidates)
@@ -847,10 +878,11 @@ def run():
             if res.get("ok"):
                 sent_count += len(chunk_items)
                 for item in chunk_items:
-                    new_entries.append({
+                    state["sent"].append({
                         "guid": item["guid"], "source": item["source"], "sent_at": now_kst().isoformat(),
                     })
                     sent_guids.add(item["guid"])
+                save_state(state)
                 print(f"  ✅ 다이제스트 청크 {i + 1}/{len(chunks)} 발송 ({len(chunk_items)}건)")
             else:
                 # 실패한 청크의 후보는 guid를 기록하지 않는다 — 다음 체크에서
@@ -861,11 +893,7 @@ def run():
     else:
         print("  (이번 체크에서 새로 보낼 커뮤글 없음)")
 
-    state["sent"].extend(new_entries)
-    state["last_run_at"] = now_kst().isoformat()
-    save_state(state)
-
-    print(f"\n[완료] 발송 {sent_count}건 / 신규 기록 {len(new_entries)}건")
+    print(f"\n[완료] 발송 {sent_count}건 / 신규 기록 {len(new_entries) + sent_count}건")
 
 
 if __name__ == "__main__":
