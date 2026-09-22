@@ -12,10 +12,13 @@ fetch_community.py 파서 회귀 테스트.
 
 import sys
 
+import time
+
 import fetch_community as fc
 from fetch_community import (
     parse_ruliweb, parse_theqoo, parse_dcinside, parse_clien, parse_inven, parse_ppomppu,
     _is_risky_title, _parse_gemini_verdict, summarize_and_check, build_digest_chunks,
+    _time_budget_exceeded, COMMUNITY_RUN_TIME_BUDGET_SEC,
 )
 
 
@@ -341,6 +344,19 @@ def test_build_digest_chunks_splits_when_too_long():
         fc.DIGEST_MAX_CHARS = original_max
 
 
+def test_time_budget_exceeded():
+    """실사고(2026-09-23): 백로그가 많아 크롤링+Gemini 검사 총 소요가 5분 스텝
+    타임아웃을 넘겨 매번 실패 → last_run_at 저장 전에 끊겨 다음 체크도 같은
+    백로그를 재처리하는 무한 실패 루프가 됐다. 예산을 넘기면 True를 반환해
+    남은 후보의 크롤링을 건너뛰게 하는 가드가 맞게 도는지 확인한다."""
+    now = time.monotonic()
+    return (
+        check("예산 안 씀(방금 시작) → 초과 아님", not _time_budget_exceeded(now))
+        and check("예산 다 씀(과거 시작) → 초과",
+                  _time_budget_exceeded(now - COMMUNITY_RUN_TIME_BUDGET_SEC - 1))
+    )
+
+
 def main():
     results = [
         test_parse_ruliweb(),
@@ -355,6 +371,7 @@ def main():
         test_build_digest_chunks_single(),
         test_build_digest_chunks_empty(),
         test_build_digest_chunks_splits_when_too_long(),
+        test_time_budget_exceeded(),
     ]
     print()
     if all(results):
