@@ -32,6 +32,7 @@ from fetch_news import (
     SUMMARY_BORDERLINE_MARGIN,
     _link_already_sent,
     _should_bypass_title_dup,
+    TAG_RE,
 )
 
 
@@ -333,6 +334,24 @@ def test_lacks_korean():
     return ok
 
 
+def test_jonghap_tag_accepts_parens():
+    """사용자 요청(2026-09-24): "(종합)도 올려야지" — 연합뉴스·뉴스1은 여러 소식을
+    묶은 기사 제목 끝에 대괄호 "[종합]" 대신 소괄호 "(종합)"도 쓴다(실사례:
+    "…한국행…별도 정착 지원 예상(종합)", v.daum.net에서 사용자가 직접 확인).
+    속보/단독은 괄호 표기 관행이 확인된 바 없어 그대로 대괄호만 인정한다."""
+    cases = [
+        ("[종합] 李대통령 발언 정리", True),
+        ("北 관련 소식 정리(종합)", True),
+        ("종합병원 파업 확산", False),  # 태그 아닌 복합어
+        ("체육대회(종합 순위 발표)", False),  # 괄호 안에 "종합" 말고 다른 말도 있음
+    ]
+    ok = True
+    for title, expected in cases:
+        got = bool(TAG_RE["종합"].search(title))
+        ok = check(f"TAG_RE[종합].search({title!r}) == {expected}", got == expected) and ok
+    return ok
+
+
 def main():
     results = [
         test_stage1_title_same_batch(),
@@ -350,6 +369,7 @@ def main():
         test_title_only_requires_both_scores(),
         test_refusal_marks(),
         test_lacks_korean(),
+        test_jonghap_tag_accepts_parens(),
     ]
     print()
     if all(results):
