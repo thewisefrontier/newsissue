@@ -33,6 +33,8 @@ from fetch_news import (
     _link_already_sent,
     _should_bypass_title_dup,
     TAG_RE,
+    _gemini_pacing_wait_sec,
+    GEMINI_CALL_PACING_SEC,
 )
 
 
@@ -352,6 +354,21 @@ def test_jonghap_tag_accepts_parens():
     return ok
 
 
+def test_gemini_call_pacing():
+    """사용자 관찰(2026-09-25): 텔레그램 발송엔 SEND_INTERVAL_SEC 간격이 있는데
+    Gemini 요약 호출엔 없어서 기사마다 곧장 다음 호출로 넘어가는 비대칭이 있었다.
+    _gemini_pacing_wait_sec가 마지막 호출로부터 GEMINI_CALL_PACING_SEC가 안
+    지났으면 남은 대기 시간을, 이미 지났으면 0을 반환하는지 확인한다."""
+    return (
+        check("직전 호출 직후(0초 경과) → 페이싱 간격만큼 대기",
+              _gemini_pacing_wait_sec(100.0, 100.0) == GEMINI_CALL_PACING_SEC)
+        and check("페이싱 간격 이상 지남 → 대기 없음(0)",
+                  _gemini_pacing_wait_sec(100.0, 100.0 + GEMINI_CALL_PACING_SEC) == 0.0)
+        and check("페이싱 간격보다 더 지남 → 대기 없음(0, 음수 아님)",
+                  _gemini_pacing_wait_sec(100.0, 200.0 + GEMINI_CALL_PACING_SEC) == 0.0)
+    )
+
+
 def main():
     results = [
         test_stage1_title_same_batch(),
@@ -370,6 +387,7 @@ def main():
         test_refusal_marks(),
         test_lacks_korean(),
         test_jonghap_tag_accepts_parens(),
+        test_gemini_call_pacing(),
     ]
     print()
     if all(results):
