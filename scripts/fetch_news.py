@@ -781,10 +781,28 @@ _ALL_GEMINI_MODELS = sorted(set(GEMINI_MODELS_FULL) | set(GEMINI_MODELS_LITE))
 _exhausted_keys = {m: set() for m in _ALL_GEMINI_MODELS}
 _current_key_idx = 0
 
+# 사용자 관찰(2026-09-25): 텔레그램 발송 쪽엔 SEND_INTERVAL_SEC 간격이 있는데
+# Gemini 요약 호출 쪽엔 없어서, stage2 루프가 기사마다 곧장 다음 Gemini 호출로
+# 넘어가는 비대칭이 있었다. 429가 실제로 RPD(일일 한도)가 아니라 RPM/TPM(분당
+# 한도)일 가능성도 있는데(뉴스파이널 프로젝트가 같은 의심으로 quotaId 로그 추적
+# 중, 2026-09-25) — 지금 코드는 429를 무조건 "이 키는 오늘 하루 소진"으로 취급해
+# _exhausted_keys에 등록한다. 진짜 분당 한도라면 몇십 초만 기다리면 복구될 키를
+# 하루 종일 못 쓰게 막는 셈이라 소진 판정 자체를 성급히 바꾸지는 않는다(RPD인지
+# RPM/TPM인지 아직 실측으로 확정 못 함 — 지표는 만들기 전에 실측 원칙). 대신
+# (1) 호출 간 최소 간격을 둬서 애초에 429를 덜 유발하고, (2) 429 응답의
+# retry_after/본문을 로그에 남겨 다음에 원인을 판단할 근거를 남긴다.
+GEMINI_CALL_PACING_SEC = SEND_INTERVAL_SEC  # 텔레그램 발송 간격과 동일하게 맞춘다
+_last_gemini_call_at = 0.0
+
+
+def _gemini_pacing_wait_sec(last_call_at: float, now: float) -> float:
+    """최소 호출 간격(GEMINI_CALL_PACING_SEC) 확보를 위해 필요한 대기 시간(초, 0 이상)."""
+    return max(0.0, GEMINI_CALL_PACING_SEC - (now - last_call_at))
+
 
 def summarize_with_gemini(title: str, raw_text: str, category: str = "") -> str:
     """크롤링한 원문을 Gemini로 2문장 요약. 실패하면 빈 문자열(발송은 계속 진행)."""
-    global _current_key_idx
+    global _current_key_idx, _last_gemini_call_at
     if not GEMINI_API_KEYS or not raw_text:
         return ""
 
@@ -824,6 +842,9 @@ def summarize_with_gemini(title: str, raw_text: str, category: str = "") -> str:
             if time.monotonic() - start > GEMINI_TIME_BUDGET_SEC:
                 print(f"  ⏱️ 요약 시간 예산({GEMINI_TIME_BUDGET_SEC}초) 초과, 남은 키 건너뜀")
                 return ""
+            wait = _gemini_pacing_wait_sec(_last_gemini_call_at, time.monotonic())
+            if wait > 0:
+                time.sleep(wait)
             try:
                 res = requests.post(
                     f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
@@ -831,8 +852,14 @@ def summarize_with_gemini(title: str, raw_text: str, category: str = "") -> str:
                     json=payload,
                     timeout=GEMINI_TIMEOUT_SEC,
                 )
+                _last_gemini_call_at = time.monotonic()
                 if res.status_code == 429:
-                    print(f"  ⚠️ Gemini({model}) 키 {idx+1} RPD 소진, 다른 키로 폴백")
+                    # RPD인지 RPM/TPM인지 판단할 근거를 남긴다 — retry_after가 짧으면(초~분
+                    # 단위) 분당 한도일 가능성이 크고, 응답 본문에 quota 종류가 찍히는 경우도
+                    # 있다(뉴스파이널 프로젝트의 quotaId 로그 추적과 같은 목적).
+                    retry_after = res.headers.get("Retry-After", "없음")
+                    print(f"  ⚠️ Gemini({model}) 키 {idx+1} 429(RPD 추정), retry_after={retry_after}, "
+                          f"본문: {res.text[:150]!r} — 다른 키로 폴백")
                     exhausted.add(idx)
                     continue
                 if res.status_code != 200:
