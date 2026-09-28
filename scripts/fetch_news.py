@@ -225,7 +225,7 @@ SUMMARY_CHAR_TRIGRAM_OVERLAP_THRESHOLD = 25  # 이상이면 중복(문자 단위
 # 중복으로 드러날 수 있다. 임계값에서 이 마진(%p) 안쪽이면 D1에서 더 긴 기간을
 # 추가 조회해 재확인한다(query_d1_recent_sent) — run() 옆 주석 참고.
 SUMMARY_BORDERLINE_MARGIN = 10
-SUMMARY_BORDERLINE_LOOKBACK_DAYS = 7
+SUMMARY_BORDERLINE_LOOKBACK_DAYS = 3  # 7→3(2026-09-28): D1 읽기 절감
 
 
 def _is_summary_borderline(word_score: float, char_score: float) -> bool:
@@ -358,6 +358,35 @@ def query_d1_link_exists(link: str) -> bool:
     except Exception as e:
         print(f"  ⚠️ D1 링크 조회 실패(무시하고 계속): {e}")
         return False
+
+
+# decisions는 계속 쌓이므로(하루 ~300행) 90일 지난 행을 지운다(2026-09-28).
+# 삭제도 쓰기 행으로 잡히므로(행 + 인덱스 5개 = 행당 6) 한 번에 최대 2000행만,
+# 새벽 4시대 첫 실행(10분 크론이라 하루 1회)에서만 돌린다. 못 지운 분은 다음 날 이어서 지운다.
+# best-effort — 실패해도 발송 흐름을 막지 않는다.
+D1_RETENTION_DAYS = 90
+D1_PRUNE_BATCH = 2000
+
+
+def prune_d1_decisions():
+    now = now_kst()
+    if not (CF_ACCOUNT_ID and CF_D1_DATABASE_ID and CF_API_TOKEN) or now.hour != 4 or now.minute >= 10:
+        return
+    try:
+        res = requests.post(
+            f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/d1/database/{CF_D1_DATABASE_ID}/query",
+            headers={"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"},
+            json={
+                "sql": "DELETE FROM decisions WHERE id IN "
+                       "(SELECT id FROM decisions WHERE run_at < ? LIMIT ?)",
+                "params": [(now - timedelta(days=D1_RETENTION_DAYS)).isoformat(), D1_PRUNE_BATCH],
+            },
+            timeout=8,
+        )
+        changes = res.json()["result"][0]["meta"]["changes"]
+        print(f"  🧹 D1 decisions {D1_RETENTION_DAYS}일 초과 {changes}행 삭제")
+    except Exception as e:
+        print(f"  ⚠️ D1 정리 실패(무시하고 계속): {e}")
 
 
 # =========================
@@ -1201,6 +1230,7 @@ def run():
 
     save_gemini_exhausted(state, _exhausted_keys)
     save_state(state)
+    prune_d1_decisions()
 
     if review_log:
         print(f"\n⚠️ 애매한 제목 유사도({DUP_REVIEW_THRESHOLD}~{DUP_SKIP_THRESHOLD}%) 통과분 {len(review_log)}건 — 임계값 조정 참고용")
