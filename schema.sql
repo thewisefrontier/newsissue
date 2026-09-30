@@ -24,4 +24,6 @@ CREATE INDEX IF NOT EXISTS idx_decisions_decision ON decisions(decision);
 CREATE INDEX IF NOT EXISTS idx_decisions_guid ON decisions(guid);
 -- 읽기 절감(2026-09-28): 링크 존재 확인 / 카테고리별 최근 발송 조회 — migrations/ 참고
 CREATE INDEX IF NOT EXISTS idx_decisions_link_decision ON decisions(link, decision);
-CREATE INDEX IF NOT EXISTS idx_decisions_category_decision ON decisions(category, decision);
+-- (category, decision)만으로는 ORDER BY run_at을 못 도와 회당 평균 2389행을 읽었다(2026-09-30
+-- 실측) — run_at을 인덱스에 포함해 최신 N행만 읽게 함. migrations/ 참고.
+CREATE INDEX IF NOT EXISTS idx_decisions_cat_dec_runat ON decisions(category, decision, run_at);
