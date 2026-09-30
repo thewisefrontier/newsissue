@@ -311,9 +311,12 @@ def query_d1_recent_sent(category: str, since_days: int = 7, limit: int = 300) -
             f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/d1/database/{CF_D1_DATABASE_ID}/query",
             headers={"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"},
             json={
+                # ORDER BY id DESC(2026-09-30까지)는 id가 아니라 category+decision만 인덱스를
+                # 타서, LIMIT에 못 미치면 이 카테고리의 보관 기간 전체를 다 읽었다(회당 평균
+                # 2389행, 실측). run_at을 인덱스에 포함하고 그걸로 정렬해 최신 300행만 읽는다.
                 "sql": ("SELECT title, summary, link FROM decisions "
                         "WHERE category = ? AND decision = 'sent' AND run_at >= ? "
-                        "ORDER BY id DESC LIMIT ?"),
+                        "ORDER BY run_at DESC LIMIT ?"),
                 "params": [category, since, limit],
             },
             timeout=8,
