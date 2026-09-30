@@ -20,8 +20,7 @@ CREATE TABLE IF NOT EXISTS decisions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_decisions_run_at ON decisions(run_at);
-CREATE INDEX IF NOT EXISTS idx_decisions_decision ON decisions(decision);
-CREATE INDEX IF NOT EXISTS idx_decisions_guid ON decisions(guid);
+-- idx_decisions_decision / idx_decisions_guid는 코드에서 안 써서 삭제(2026-09-29, migrations/ 참고)
 -- 읽기 절감(2026-09-28): 링크 존재 확인 / 카테고리별 최근 발송 조회 — migrations/ 참고
 CREATE INDEX IF NOT EXISTS idx_decisions_link_decision ON decisions(link, decision);
 -- (category, decision)만으로는 ORDER BY run_at을 못 도와 회당 평균 2389행을 읽었다(2026-09-30
