@@ -2,3 +2,5 @@ feedparser
 requests
 python-dotenv
 googlenewsdecoder
+# googlenewsdecoder(최신 0.1.7)가 selectolax.parser(Modest 백엔드)를 import하는데, selectolax 1.0.0이 그 백엔드를 제거해 ImportError(2026-10-04 Actions 실패). 상한 고정.
+selectolax<1.0
