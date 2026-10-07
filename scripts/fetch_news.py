@@ -750,9 +750,10 @@ def fetch_candidates(category: str, url: str) -> list:
 # =========================
 
 # 실사고(2026-10-07): 채널 글 링크가 전부 news.google.com 리다이렉트 주소로 나가 미리보기가
-# 안 붙었다(D1 sent 기준 최소 9/29부터 100%, 로컬에서는 같은 라이브러리가 정상 해석).
-# 기존 코드는 status=False로 실패하면 로그 없이 원래 링크로 넘어가 원인을 알 수 없었다 —
-# 실패 사유를 로그와 D1(decode_fail, 실행당 1건)에 남긴다. 원인 확인 후 정리할 것.
+# 안 붙었다(D1 sent 기준 최소 9/29부터 100%). 원인: Actions(Python 3.11)에 설치되는 최신
+# googlenewsdecoder는 성공 응답이 {"success": True, "decoded_url": ...}인데(구버전은
+# "status"), 코드가 "status"만 봐서 해석에 성공하고도 원래 구글 링크를 썼다. 두 키를 모두
+# 인정한다. 진짜 실패는 사유를 로그와 D1(decode_fail, 실행당 1건)에 남긴다.
 _decode_fail_logged = False
 
 
@@ -761,7 +762,7 @@ def resolve_real_url(google_link: str) -> str:
     global _decode_fail_logged
     try:
         res = gnewsdecoder(google_link, interval=1)
-        if res.get("status") and res.get("decoded_url"):
+        if (res.get("success") or res.get("status")) and res.get("decoded_url"):
             return res["decoded_url"]
         reason = f"type={type(res).__name__} res={repr(res)[:400]}"
     except Exception as e:

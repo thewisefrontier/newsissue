@@ -369,6 +369,32 @@ def test_gemini_call_pacing():
     )
 
 
+def test_resolve_real_url_accepts_both_response_shapes():
+    """실사고(2026-10-07): Actions에 설치되는 최신 googlenewsdecoder는 성공 응답이
+    {"success": True, ...}인데 코드가 구버전 키 "status"만 봐서 해석에 성공하고도 구글
+    링크를 써, 채널 글 미리보기가 약 9일간 안 붙었다. 신/구 응답 형태 모두 실제 URL을
+    돌려주고, 진짜 실패는 원래 링크를 돌려주는지 확인한다(네트워크·D1 호출은 대체)."""
+    import fetch_news as fn
+    saved = (fn.gnewsdecoder, fn.log_decision, fn._decode_fail_logged)
+    fn.log_decision = lambda *a, **k: None
+    try:
+        g = "https://news.google.com/rss/articles/x"
+        real = "https://example.com/a"
+        cases = [
+            ({"success": True, "decoded_url": real}, real),
+            ({"status": True, "decoded_url": real}, real),
+            ({"success": False, "error": "blocked"}, g),
+            ({"status": False, "message": "err"}, g),
+        ]
+        ok = True
+        for resp, expected in cases:
+            fn.gnewsdecoder = lambda link, interval=1, r=resp: r
+            ok = check(f"resolve_real_url({resp}) == {expected}", fn.resolve_real_url(g) == expected) and ok
+        return ok
+    finally:
+        fn.gnewsdecoder, fn.log_decision, fn._decode_fail_logged = saved
+
+
 def main():
     results = [
         test_stage1_title_same_batch(),
@@ -388,6 +414,7 @@ def main():
         test_lacks_korean(),
         test_jonghap_tag_accepts_parens(),
         test_gemini_call_pacing(),
+        test_resolve_real_url_accepts_both_response_shapes(),
     ]
     print()
     if all(results):
