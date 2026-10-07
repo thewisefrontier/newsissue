@@ -763,7 +763,7 @@ def resolve_real_url(google_link: str) -> str:
         res = gnewsdecoder(google_link, interval=1)
         if res.get("status") and res.get("decoded_url"):
             return res["decoded_url"]
-        reason = f"status={res.get('status')} message={str(res.get('message'))[:300]}"
+        reason = f"type={type(res).__name__} res={repr(res)[:400]}"
     except Exception as e:
         reason = f"exception {type(e).__name__}: {str(e)[:300]}"
     print(f"  ⚠️ 링크 해석 실패: {reason}")
