@@ -749,14 +749,27 @@ def fetch_candidates(category: str, url: str) -> list:
 # 링크 해석
 # =========================
 
+# 실사고(2026-10-07): 채널 글 링크가 전부 news.google.com 리다이렉트 주소로 나가 미리보기가
+# 안 붙었다(D1 sent 기준 최소 9/29부터 100%, 로컬에서는 같은 라이브러리가 정상 해석).
+# 기존 코드는 status=False로 실패하면 로그 없이 원래 링크로 넘어가 원인을 알 수 없었다 —
+# 실패 사유를 로그와 D1(decode_fail, 실행당 1건)에 남긴다. 원인 확인 후 정리할 것.
+_decode_fail_logged = False
+
+
 def resolve_real_url(google_link: str) -> str:
     """구글 뉴스 리다이렉트 링크 → 실제 언론사 URL. 실패하면 원래 링크 그대로."""
+    global _decode_fail_logged
     try:
         res = gnewsdecoder(google_link, interval=1)
         if res.get("status") and res.get("decoded_url"):
             return res["decoded_url"]
+        reason = f"status={res.get('status')} message={str(res.get('message'))[:300]}"
     except Exception as e:
-        print(f"  ⚠️ 링크 해석 실패: {e}")
+        reason = f"exception {type(e).__name__}: {str(e)[:300]}"
+    print(f"  ⚠️ 링크 해석 실패: {reason}")
+    if not _decode_fail_logged:
+        _decode_fail_logged = True
+        log_decision("", "진단", "decode_fail", google_link, "decode_fail", compare_text=reason)
     return google_link
 
 
