@@ -1,0 +1,7 @@
+# git-crypt 암호화 대상(2026-10-18) — 커뮤니티 수집 대상·선정·필터 규칙·판정 프롬프트, 뉴스 요약 프롬프트.
+# 키: 뉴스파이널(wise-frontier)과 같은 키, 시크릿 GIT_CRYPT_KEY. data/*.json(Actions가 커밋)은 넣지 말 것.
+# ⚠️ 이 저장소는 GitHub API로 파일을 올리면 평문이 노출된다 — git commit·push로만.
+scripts/fetch_community.py filter=git-crypt diff=git-crypt
+scripts/fetch_news.py filter=git-crypt diff=git-crypt
+scripts/test_community.py filter=git-crypt diff=git-crypt
+scripts/test_dedup.py filter=git-crypt diff=git-crypt
