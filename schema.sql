@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_at TEXT NOT NULL,          -- KST ISO8601, 실행 시각
     guid TEXT NOT NULL,
-    category TEXT NOT NULL,        -- 속보/단독/종합
+    category TEXT NOT NULL,        -- 속보/단독/종합/르포
     title TEXT NOT NULL,
     link TEXT,
     decision TEXT NOT NULL,        -- sent / dup_title / dup_summary / excluded_domain
